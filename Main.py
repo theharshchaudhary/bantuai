@@ -87,6 +87,12 @@ def build() -> tuple[Agent, cfg.Settings]:
     # Windows-only tools are registered INTO the portable core, never imported by it.
     if sys.platform == "win32":
         try:
+            from platform_desktop import files
+
+            files.register(_REGISTRY)
+        except Exception as e:
+            logging.getLogger("bantu").warning("file tools unavailable: %s", e)
+        try:
             from platform_desktop import ocr
 
             ocr.register(_REGISTRY)

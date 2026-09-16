@@ -36,8 +36,8 @@ Owner: Harsh. Repo: `theharshchaudhary/bantuai`, branch `main`.
 | 00 | Repo hygiene — `.gitignore`, `.env` untracked, `.env.example` | **done** (`251ad67`) |
 | 01 | Foundation — config, keyring, provider interface, Gemini + Groq adapters, failover router | **done** |
 | 02 | Agent core — tool registry, the loop, SQLite memory, vision, Windows OCR, CLI | **done** |
-| 03 | File tools (14) | **next** |
-| 04 | System + app tools (16), guarded PowerShell | — |
+| 03 | File tools (15) — search, read, docs, write, organize, archives | **done** |
+| 04 | System + app tools (16), guarded PowerShell | **next** |
 | 05 | Web tools (7) — DuckDuckGo, Selenium | — |
 | 06 | Voice — Groq Whisper, edge-tts, wake word, barge-in | — |
 | 07 | HUD overlay UI (PyQt5) — replaces the plain chat window | — |
@@ -70,8 +70,12 @@ The old `Backend/Model.py` Cohere router is now retired.
 Run it: `.venv/Scripts/python.exe main.py` (add `-v` for tool output, or pass a one-shot query).
 `/tools`, `/status`, `/facts`, `/new` inside the REPL.
 
-**8 tools so far:** `get_datetime`, `remember`, `recall`, `forget`, `search_history` (portable),
-`read_screen`, `find_on_screen` (Windows OCR), `look_at_screen` (Gemini vision).
+**23 tools so far** — `/tools` lists them with their tier:
+- **core** (5, portable): `get_datetime`, `remember`, `recall`, `forget`, `search_history`
+- **screen** (3): `read_screen`, `find_on_screen` (Windows OCR), `look_at_screen` (Gemini vision)
+- **files** (15): `search_files`, `read_file`, `read_document`, `list_directory`, `file_info`,
+  `disk_usage` are AUTO; `write_file`, `edit_file`, `move_file`, `copy_file`, `delete_file`,
+  `create_folder`, `organize_folder`, `compress`, `extract` need confirmation.
 Tools default to `Tier.CONFIRM` when unspecified — a tool author who forgets to think about safety
 gets the cautious behaviour, not the dangerous one.
 
@@ -98,6 +102,8 @@ Tests:
   message/tool conversion, router failover).
 - `tests/test_phase2.py` — 72 checks, no API key needed (schema generation, argument coercion,
   permission tiers, memory + FTS5, and the agent loop driven by a scripted provider).
+- `tests/test_phase3.py` — 70 checks, no API key needed (path guards, every file tool, Recycle
+  Bin semantics, zip-slip refusal, and that no hard delete is ever called).
   Add a `test_phaseN.py` per phase and keep them key-free.
 - `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15
   free requests (mind the 20/day/model Gemini cap when re-running).
@@ -208,7 +214,10 @@ Program Files writes, disk formatting, Defender/firewall changes, and **Bantu's 
 That last one matters most — without it, "set all tools to auto" is a valid tool call and the whole
 model collapses.
 
-Deletes go to the Recycle Bin, never a hard unlink.
+Deletes go to the Recycle Bin, never a hard unlink — `platform_desktop/paths.py` enforces the
+blocklist and `files.py` contains no `os.remove`/`rmtree`/`unlink` call at all, which
+`test_phase3.py` asserts against the source. `organize_folder` defaults to a dry run, and `extract`
+refuses zip-slip paths.
 
 ## Conventions
 
