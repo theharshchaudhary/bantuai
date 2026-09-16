@@ -35,8 +35,8 @@ Owner: Harsh. Repo: `theharshchaudhary/bantuai`, branch `main`.
 |---|---|---|
 | 00 | Repo hygiene — `.gitignore`, `.env` untracked, `.env.example` | **done** (`251ad67`) |
 | 01 | Foundation — config, keyring, provider interface, Gemini + Groq adapters, failover router | **done** |
-| 02 | Agent core — tool registry, the loop, SQLite memory, vision, Windows OCR | **next** |
-| 03 | File tools (14) | — |
+| 02 | Agent core — tool registry, the loop, SQLite memory, vision, Windows OCR, CLI | **done** |
+| 03 | File tools (14) | **next** |
 | 04 | System + app tools (16), guarded PowerShell | — |
 | 05 | Web tools (7) — DuckDuckGo, Selenium | — |
 | 06 | Voice — Groq Whisper, edge-tts, wake word, barge-in | — |
@@ -65,7 +65,15 @@ ui/                     PyQt5 HUD, settings, tray
 ```
 
 One loop handles everything. **No intent routing** — the model reads the tool list and decides.
-The old `Backend/Model.py` Cohere router is retired by Phase 02.
+The old `Backend/Model.py` Cohere router is now retired.
+
+Run it: `.venv/Scripts/python.exe main.py` (add `-v` for tool output, or pass a one-shot query).
+`/tools`, `/status`, `/facts`, `/new` inside the REPL.
+
+**8 tools so far:** `get_datetime`, `remember`, `recall`, `forget`, `search_history` (portable),
+`read_screen`, `find_on_screen` (Windows OCR), `look_at_screen` (Gemini vision).
+Tools default to `Tier.CONFIRM` when unspecified — a tool author who forgets to think about safety
+gets the cautious behaviour, not the dangerous one.
 
 ## The stack — all verified working on this machine
 
@@ -87,7 +95,10 @@ Dev environment: `.venv/` in the repo root (gitignored). Python 3.11.9.
 
 Tests:
 - `tests/test_phase1.py` — 45 checks, **no API key needed** (settings round-trip, both adapters'
-  message/tool conversion, router failover). Add a `test_phaseN.py` per phase and keep them key-free.
+  message/tool conversion, router failover).
+- `tests/test_phase2.py` — 72 checks, no API key needed (schema generation, argument coercion,
+  permission tiers, memory + FTS5, and the agent loop driven by a scripted provider).
+  Add a `test_phaseN.py` per phase and keep them key-free.
 - `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15
   free requests (mind the 20/day/model Gemini cap when re-running).
   Covers what fakes cannot: real wire formats, the tool-call round trip, vision, and the
@@ -118,6 +129,17 @@ not for local *reasoning*. That split is the whole reason $0 works.
   providers that cannot. Practical ceiling: roughly 200 text tasks/day, and **~120 vision calls/day**
   — vision is the genuinely scarce resource, so use Windows OCR first and Gemini only when the
   question needs seeing rather than reading.
+- **Optional tool arguments must be typed `[X, "null"]`.** Models routinely emit
+  `"region": null` for an argument they mean to omit. Groq validates tool arguments
+  server-side and rejects that against a plain `"string"`; Gemini tolerates it. Tested all three
+  dialects: only the **type-list form is accepted by both** — `"nullable": true` fails on Groq
+  exactly like a plain type does. `build_schema` does this automatically for any parameter with a
+  default, and `_coerce` treats an explicit null as "omitted" while rejecting null for a
+  *required* argument.
+- **Force UTF-8 on stdout before printing anything.** The Windows console is cp1252 and cannot
+  encode Devanagari, so every Hindi and Nepali reply raises `UnicodeEncodeError` — it even choked
+  on a narrow no-break space in an English reply. `main.py` reconfigures both streams at import.
+  Any new entry point must do the same.
 - **Groq Compound cannot call your tools.** `groq/compound` and `compound-mini` return
   `400: tool calling is not supported` — their agentic tooling is built in, not yours. Tool-capable
   free ids: `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.8-27b`. `allam-2-7b` cannot
