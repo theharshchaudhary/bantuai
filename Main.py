@@ -3,8 +3,9 @@
 A terminal front end while the HUD is built (Phase 07). It wires the portable
 core to the Windows tool set and runs a conversation.
 
-    .venv/Scripts/python.exe main.py
-    .venv/Scripts/python.exe main.py "read my screen"
+    .venv/Scripts/python.exe main.py                  floating orb (default)
+    .venv/Scripts/python.exe main.py --cli            terminal REPL
+    .venv/Scripts/python.exe main.py "read my screen"  one-shot
 """
 
 from __future__ import annotations
@@ -78,6 +79,8 @@ def confirm(tool: Tool, args: dict) -> bool:
 _REGISTRY = ToolRegistry()
 _SPEAKER = None
 _LISTENER = None
+#: Extra reminder announcers. The HUD registers one; the CLI needs none.
+_ANNOUNCERS: list = []
 
 
 def build() -> tuple[Agent, cfg.Settings]:
@@ -134,6 +137,11 @@ def build() -> tuple[Agent, cfg.Settings]:
             _REGISTRY.tools["notify"].fn(title=title, message=body)
         except Exception:
             pass
+        for hook in list(_ANNOUNCERS):
+            try:
+                hook(title, body)
+            except Exception:
+                pass
 
     scheduler = ReminderScheduler(memory, announce)
     scheduler.start()
@@ -156,6 +164,36 @@ def build() -> tuple[Agent, cfg.Settings]:
         confirm=confirm,
     )
     return agent, settings
+
+
+def run_hud(agent: Agent, settings: cfg.Settings) -> int:
+    """Launch the floating orb. The default front end."""
+    from PyQt5.QtCore import QCoreApplication, QLockFile, Qt
+    from PyQt5.QtWidgets import QApplication
+
+    QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QCoreApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    app = QApplication(sys.argv)
+    app.setApplicationName("Bantu")
+    # Closing the panel hides it; Bantu keeps running until quit from the tray.
+    app.setQuitOnLastWindowClosed(False)
+
+    lock_path = cfg.user_data_dir() / "bantu.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(lock_path))
+    if not lock.tryLock(100):
+        print("Bantu is already running - look for the orb or the tray icon.")
+        return 0
+
+    from ui.app import BantuApp
+
+    hud = BantuApp(agent, settings, listener=_LISTENER, speaker=_SPEAKER)
+    _ANNOUNCERS.append(hud.announced.emit)
+    try:
+        return app.exec_()
+    finally:
+        hud.shutdown()
+        lock.unlock()
 
 
 HELP = """\
@@ -183,6 +221,8 @@ def main() -> int:
     if args:  # one-shot mode
         print(agent.run(" ".join(args)).text)
         return 0
+    if "--cli" not in sys.argv:
+        return run_hud(agent, settings)
 
     print(
         BANNER.format(

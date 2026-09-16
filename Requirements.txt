@@ -37,10 +37,11 @@ numpy                   # audio buffers and the silence gate
 pygame                  # mp3 playback that can be stopped mid-sentence (barge-in)
 # webrtcvad deliberately not used: it needs a native build on Windows, and an
 # energy gate is enough to answer "has this person stopped talking".
-# openwakeword lands with the HUD in Phase 07, where a global hotkey belongs.
+# openwakeword is not used: no "Bantu" model exists. See CLAUDE.md, "Wake word".
 
 # --- Phase 07: desktop UI ---------------------------------------------------
 PyQt5
+keyboard                # global push-to-talk hotkey, no admin rights needed
 
 # --- Phase 08: GUI control --------------------------------------------------
 pyautogui               # clicks and typing, driven by OCR word boxes

@@ -21,9 +21,9 @@ Owner: Harsh. Repo: `theharshchaudhary/bantuai`, branch `main`.
 1. **$0 forever.** No paid APIs, ever. Free tiers only. If a feature needs money, it does not ship.
 2. **Nothing to download.** No Ollama, no local LLM weights, no separate installers (this is why
    Tesseract was rejected in favour of the Windows OCR API). The `.exe` must be one click.
-   Harsh confirmed **1-2MB downloads are acceptable**, so small bundled model files are fine
-   (openWakeWord, ~2MB). The Selenium browser driver is ~15MB and sits outside that, so it
-   remains an open packaging decision.
+   The line Harsh drew: **tens of megabytes are fine, gigabytes are not.** openWakeWord (~2MB)
+   and a Selenium browser driver (~15MB) are acceptable; Ollama plus multi-GB model weights are
+   not, and that is what this rule exists to prevent. No separate installer the user must run.
 3. **`core/` stays portable.** No PyQt5, no Windows-only imports, no desktop dependencies inside
    `core/`. Tools are *registered into* it by the platform layer. This is what keeps a future Android
    client possible.
@@ -41,8 +41,8 @@ Owner: Harsh. Repo: `theharshchaudhary/bantuai`, branch `main`.
 | 04 | System + app tools (17), guarded PowerShell | **done** |
 | 05 | Web tools (8) — DuckDuckGo, page fetch, Selenium | **done** |
 | 06 | Voice — Groq Whisper in, edge-tts out, barge-in | **done** |
-| 07 | HUD overlay UI (PyQt5) + wake word + global hotkey | **next** |
-| 08 | GUI control — click-by-name via OCR boxes, vision fallback | — |
+| 07 | HUD — floating orb, chat panel, tray, global hotkey | **done** |
+| 08 | GUI control — click-by-name via OCR boxes, vision fallback | **next** |
 | 09 | Onboarding — first-run wizard, settings | — |
 | 10 | Packaging — PyInstaller `.exe` | — |
 | 11 | README rewrite | — |
@@ -62,14 +62,19 @@ core/                   PORTABLE — no desktop imports allowed
 platform_desktop/       Windows tools, registered INTO core
   files.py system.py web.py shell.py ocr.py gui.py
 voice/                  stt.py, tts.py
-ui/                     PyQt5 HUD, settings, tray
+ui/                     widgets.py (orb, panel, chips, confirm bar), app.py (worker thread, tray, hotkey)
 ```
 
 One loop handles everything. **No intent routing** — the model reads the tool list and decides.
 The old `Backend/Model.py` Cohere router is now retired.
 
-Run it: `.venv/Scripts/python.exe main.py` (add `-v` for tool output, or pass a one-shot query).
-`/tools`, `/status`, `/facts`, `/new` inside the REPL.
+Run it:
+- `.venv/Scripts/python.exe main.py` — the floating orb (default). Click it, or press
+  **Ctrl+Alt+Space** anywhere to speak. Quit from the tray icon; closing the panel only hides it.
+- `main.py --cli` — terminal REPL (`-v` for tool output; `/tools`, `/status`, `/facts`, `/new`).
+- `main.py "a question"` — one-shot.
+
+Only one instance runs at a time (a `QLockFile` in `%APPDATA%\BantuAI`).
 
 **52 tools so far** — `/tools` lists them with their tier:
 - **core** (5, portable): `get_datetime`, `remember`, `recall`, `forget`, `search_history`
@@ -106,7 +111,8 @@ gets the cautious behaviour, not the dangerous one.
 | TTS | `edge-tts` | free, no API key, Microsoft neural voices |
 | TTS offline | `winsdk` → `SpeechSynthesizer` | built into Windows, 3 voices |
 | Memory search | SQLite **FTS5** | already inside Python, no embedding model |
-| Wake word | openWakeWord | ~2MB, bundled into the exe |
+| Summon | global hotkey via `keyboard` | **Ctrl+Alt+Space**, configurable as `hotkey` |
+| Wake word | *not shipped* | see "Wake word" below |
 | Search | DuckDuckGo | no key, no quota |
 
 Dev environment: `.venv/` in the repo root (gitignored). Python 3.11.9.
@@ -124,6 +130,9 @@ Tests:
 - `tests/test_phase6.py` — 39 checks; real synthesis and transcription round trips. The Nepali
   assertion deliberately only requires Devanagari back, recording the real accuracy rather
   than an aspiration.
+- `tests/test_phase7.py` — 47 checks, runs Qt **offscreen** against a scripted agent: real worker
+  thread, the cross-thread confirmation handshake (reject / approve / approve-all), error state,
+  and quitting while a prompt is open. No window appears.
 - `tests/test_fixes.py` — 34 checks guarding bugs that actually shipped: images surviving the
   agent loop, database migration, reminders, multi-word screen matching, region parsing.
   Add a `test_phaseN.py` per phase and keep them key-free.
@@ -199,6 +208,24 @@ immediately instead of failing the turn.
 - Windows OCR word boxes mean **"click Save" needs no model call** — a local lookup plus a mouse move.
   This makes most GUI control free.
 
+### PyQt5 traps — each was a hard native crash, not an exception
+
+Found by bisection in Phase 7. A native crash kills the process with no Python traceback (exit
+127 from bash, nothing from `faulthandler`), so these are expensive to rediscover.
+
+1. **`QPainterPath.addEllipse(QRect)` crashes.** Always pass `QRectF(rect)`. `QPainter.drawEllipse`
+   accepts a `QRect` fine; only the path method does not.
+2. **Never name a signal `event`.** It shadows the virtual `QObject.event()`, which Qt calls for
+   every delivered event — `moveToThread` sends a ThreadChange event straight into it. The same
+   applies to any QObject member (`thread`, `parent`, `timerEvent`, ...). `test_phase7.py` fails
+   if a Bantu class shadows one.
+3. **`setFocus()` on a widget that is not shown yet is silently ignored.** Defer it with
+   `QTimer.singleShot(0, widget.setFocus)`. The confirm prompt's focus fell to the panel's close
+   button until this was fixed; it now lands on **Reject**, so a stray Enter is the safe choice.
+
+Stylesheets must target object names (`QFrame#shell`), never a bare `QFrame{}`: `QLabel` and
+`QScrollArea` both subclass `QFrame`, so a class selector restyles every label inside.
+
 ## Language and voice
 
 Bantu must speak **English, Hindi and Nepali**. TTS is `edge-tts` — free, no API key, no download.
@@ -235,6 +262,17 @@ Nepali comes back with mangled word boundaries — `मेरो पुरान
 and understands spoken Nepali badly. Prefer typing for Nepali, especially for anything with a
 number in it such as a reminder time. There is no free alternative; Windows `SpeechRecognizer`
 has no Nepali pack either. This is a genuine limitation, not a bug to chase.
+
+## Wake word
+
+**Not shipped, deliberately.** openWakeWord's pretrained models are `alexa`, `hey_mycroft`,
+`hey_jarvis`, `hey_rhasspy`, `timer` and `weather` — **there is no "Bantu" model**, and
+`hey_jarvis` is Marvel's trademark. A custom "Bantu" wake word means training a model with
+openWakeWord's synthetic-data pipeline: its own project, post-v1.
+
+The global hotkey delivers the same "always there" behaviour today, instantly and with nothing to
+mishear. It is **Ctrl+Alt+Space, not Ctrl+Space** — Ctrl+Space is IntelliSense in VS Code and the
+input-method switch on Windows, so it would fire constantly.
 
 ## Safety model
 
@@ -281,8 +319,6 @@ git history keeps them. `Frontend/Files/*.data` (the old PyQt file-based IPC) an
 
 `Frontend/Graphics/` assets (including `Jarvis.gif`) survive and are reused by the Phase 07 HUD.
 
-**Known tension:** Selenium needs a browser driver, which it downloads on first use. That rubs
-against the zero-install rule, so the browser tools are lazy — nothing is fetched unless one is
-actually used, and a missing driver produces an explanation pointing at `web_search`/`fetch_page`
-rather than a crash. Revisit before packaging: either bundle a driver or ship without the three
-browser tools.
+**Resolved:** the ~15MB Selenium driver is within Harsh's accepted download size, so the browser
+tools ship. They stay lazy anyway — nothing is fetched until one is used, and a missing driver
+explains itself rather than crashing.

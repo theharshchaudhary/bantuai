@@ -101,6 +101,9 @@ class Settings:
     #: Hindi and Nepali share the Devanagari script, so a reply in it is
     #: ambiguous. Word markers decide when they can; this breaks the tie.
     devanagari_default: str = "hi"
+    #: Global push-to-talk combination. Not Ctrl+Space: that is IntelliSense in
+    #: VS Code and the input-method switch on Windows, so it would fire constantly.
+    hotkey: str = "ctrl+alt+space"
     voices: dict[str, dict[str, str]] = field(
         default_factory=lambda: json.loads(json.dumps(DEFAULT_VOICES))
     )
