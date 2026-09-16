@@ -76,6 +76,8 @@ def confirm(tool: Tool, args: dict) -> bool:
 
 
 _REGISTRY = ToolRegistry()
+_SPEAKER = None
+_LISTENER = None
 
 
 def build() -> tuple[Agent, cfg.Settings]:
@@ -136,6 +138,15 @@ def build() -> tuple[Agent, cfg.Settings]:
     scheduler = ReminderScheduler(memory, announce)
     scheduler.start()
 
+    global _SPEAKER, _LISTENER
+    try:
+        from voice import Listener, Speaker
+
+        _SPEAKER = Speaker(settings)
+        _LISTENER = Listener(settings, cfg.get_key)
+    except Exception as e:
+        logging.getLogger("bantu").warning("voice unavailable: %s", e)
+
     agent = Agent(
         router=router,
         registry=_REGISTRY,
@@ -152,6 +163,9 @@ HELP = """\
   /status    provider quota and cooldown state
   /facts     what Bantu remembers about you
   /reminders what is scheduled
+  /listen    speak your next message instead of typing
+  /voice     toggle spoken replies on or off
+  /mics      list microphones
   /new       start a fresh conversation
   /quit      exit
 """
@@ -212,6 +226,52 @@ def main() -> int:
             else:
                 print("  (nothing scheduled)")
             continue
+        if line == "/voice":
+            settings.voice_enabled = not settings.voice_enabled
+            settings.save()
+            print(f"{DIM}  spoken replies {'on' if settings.voice_enabled else 'off'}{RESET}")
+            continue
+        if line == "/mics":
+            try:
+                from voice import list_devices
+
+                cur = getattr(settings, "mic_device", None)
+                for i, name in list_devices():
+                    mark = " <- current" if i == cur else (" <- default" if cur is None and i == 0 else "")
+                    print(f"  [{i}] {name}{mark}")
+                print(f"{DIM}  set one with /mic <number>{RESET}")
+            except Exception as e:
+                print(f"{RED}  {e}{RESET}")
+            continue
+        if line.startswith("/mic "):
+            try:
+                settings.mic_device = int(line.split()[1])
+                settings.save()
+                if _LISTENER:
+                    _LISTENER.device = settings.mic_device
+                    _LISTENER._threshold = None
+                print(f"{DIM}  microphone set to {settings.mic_device}{RESET}")
+            except (ValueError, IndexError):
+                print(f"{RED}  usage: /mic <number>, see /mics{RESET}")
+            continue
+        if line == "/listen":
+            if _LISTENER is None:
+                print(f"{RED}  voice input is unavailable{RESET}")
+                continue
+            if _SPEAKER:
+                _SPEAKER.stop()   # barge-in: never talk over the user
+            print(f"{DIM}  listening... (speak, then pause){RESET}", flush=True)
+            try:
+                line = _LISTENER.listen(
+                    on_start=lambda: print(f"{DIM}  hearing you{RESET}", flush=True)
+                )
+            except Exception as e:
+                print(f"{RED}  {e}{RESET}")
+                continue
+            if not line.strip():
+                print(f"{DIM}  nothing heard{RESET}")
+                continue
+            print(f"{BOLD}you ›{RESET} {line}")
         if line == "/new":
             agent.memory.new_conversation()
             print(f"{DIM}  new conversation{RESET}")
@@ -225,6 +285,11 @@ def main() -> int:
 
 
 def _cleanup() -> None:
+    for shut in (lambda: _SPEAKER and _SPEAKER.shutdown(),):
+        try:
+            shut()
+        except Exception:
+            pass
     try:
         from platform_desktop import web
 

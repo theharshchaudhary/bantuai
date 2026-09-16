@@ -33,8 +33,11 @@ webdriver-manager
 # --- Phase 06: voice --------------------------------------------------------
 edge-tts                # Microsoft neural voices, free, no API key
 sounddevice             # microphone capture
-webrtcvad               # trims silence so Whisper is not spent on dead air
-openwakeword            # "Bantu" wake word; ~2MB, bundled into the exe
+numpy                   # audio buffers and the silence gate
+pygame                  # mp3 playback that can be stopped mid-sentence (barge-in)
+# webrtcvad deliberately not used: it needs a native build on Windows, and an
+# energy gate is enough to answer "has this person stopped talking".
+# openwakeword lands with the HUD in Phase 07, where a global hotkey belongs.
 
 # --- Phase 07: desktop UI ---------------------------------------------------
 PyQt5

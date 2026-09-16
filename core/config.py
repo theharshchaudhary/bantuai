@@ -95,6 +95,12 @@ class Settings:
     voice_enabled: bool = True
     voice_gender: str = "female"
     voice_rate: str = "+4%"
+    #: Index from voice.list_devices(). None uses the system default, which on
+    #: this machine is a webcam microphone rather than the built-in array.
+    mic_device: int | None = None
+    #: Hindi and Nepali share the Devanagari script, so a reply in it is
+    #: ambiguous. Word markers decide when they can; this breaks the tie.
+    devanagari_default: str = "hi"
     voices: dict[str, dict[str, str]] = field(
         default_factory=lambda: json.loads(json.dumps(DEFAULT_VOICES))
     )

@@ -21,8 +21,9 @@ Owner: Harsh. Repo: `theharshchaudhary/bantuai`, branch `main`.
 1. **$0 forever.** No paid APIs, ever. Free tiers only. If a feature needs money, it does not ship.
 2. **Nothing to download.** No Ollama, no local LLM weights, no separate installers (this is why
    Tesseract was rejected in favour of the Windows OCR API). The `.exe` must be one click.
-   Small model files may be *bundled into the exe at build time* (openWakeWord, ~2MB) — that is fine
-   because the user never sees a download.
+   Harsh confirmed **1-2MB downloads are acceptable**, so small bundled model files are fine
+   (openWakeWord, ~2MB). The Selenium browser driver is ~15MB and sits outside that, so it
+   remains an open packaging decision.
 3. **`core/` stays portable.** No PyQt5, no Windows-only imports, no desktop dependencies inside
    `core/`. Tools are *registered into* it by the platform layer. This is what keeps a future Android
    client possible.
@@ -39,8 +40,8 @@ Owner: Harsh. Repo: `theharshchaudhary/bantuai`, branch `main`.
 | 03 | File tools (15) — search, read, docs, write, organize, archives | **done** |
 | 04 | System + app tools (17), guarded PowerShell | **done** |
 | 05 | Web tools (8) — DuckDuckGo, page fetch, Selenium | **done** |
-| 06 | Voice — Groq Whisper, edge-tts, wake word, barge-in | **next** |
-| 07 | HUD overlay UI (PyQt5) — replaces the plain chat window | — |
+| 06 | Voice — Groq Whisper in, edge-tts out, barge-in | **done** |
+| 07 | HUD overlay UI (PyQt5) + wake word + global hotkey | **next** |
 | 08 | GUI control — click-by-name via OCR boxes, vision fallback | — |
 | 09 | Onboarding — first-run wizard, settings | — |
 | 10 | Packaging — PyInstaller `.exe` | — |
@@ -120,6 +121,9 @@ Tests:
 - `tests/test_phase4.py` — 57 checks, no API key needed (real read-only system calls, gating of
   disruptive tools, critical-process refusal, and 21 PowerShell deny-list categories).
 - `tests/test_phase5.py` — 37 checks; search and fetch hit the real network (both free).
+- `tests/test_phase6.py` — 39 checks; real synthesis and transcription round trips. The Nepali
+  assertion deliberately only requires Devanagari back, recording the real accuracy rather
+  than an aspiration.
 - `tests/test_fixes.py` — 34 checks guarding bugs that actually shipped: images surviving the
   agent loop, database migration, reminders, multi-word screen matching, region parsing.
   Add a `test_phaseN.py` per phase and keep them key-free.
@@ -216,8 +220,21 @@ Render all six at `rate="+4%"`; plain default rate sounds fractionally sluggish.
 > The legacy `Backend/Chatbot.py` system prompt says *"Reply in only English, even if the question is
 > in Hindi."* **That rule is reversed.** Bantu replies in whatever language the user used.
 
-Whisper handles Hindi well; Nepali accuracy is weaker — verify before relying on it.
-Windows `SpeechRecognizer` likely has no Nepali at all, so offline STT is English/Hindi only.
+**Measured 2026-09-16, speaking each line with edge-tts and transcribing it back through
+Groq Whisper:**
+
+| Language | Speech out | Speech in |
+|---|---|---|
+| English | perfect | **perfect** |
+| Hindi | perfect | **perfect** |
+| Nepali | perfect | **poor** |
+
+Nepali comes back with mangled word boundaries — `मेरो पुराना फाइलहरू मेटाऊ र` became
+`मेरो पुराना फाइल हरु मे ताउर`, and `भोलि बिहान नौ बजे मलाई सम्झाऊ` became near-gibberish.
+**Passing `language="ne"` does not help** — tested, identical output. So Bantu speaks Nepali well
+and understands spoken Nepali badly. Prefer typing for Nepali, especially for anything with a
+number in it such as a reminder time. There is no free alternative; Windows `SpeechRecognizer`
+has no Nepali pack either. This is a genuine limitation, not a bug to chase.
 
 ## Safety model
 
