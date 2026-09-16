@@ -259,6 +259,12 @@ class GeminiProvider(LLMProvider):
                     self._no_thinking_cfg = True
                     cfg.pop("thinking_config", None)
                     continue
+                if isinstance(err, RateLimited):
+                    # Free-tier quota is per model per day, so an exhausted id
+                    # says nothing about the next one. Rotating turns 20/day
+                    # into roughly 20 x (number of usable models).
+                    self._demote(model, "daily quota exhausted")
+                    continue
                 if isinstance(err, TransientError):
                     # 503/504 happen: a model spikes or stalls. Move to the next
                     # preference straight away rather than failing the turn, and

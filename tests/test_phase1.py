@@ -67,7 +67,7 @@ cfg.user_data_dir.__wrapped__ if hasattr(cfg.user_data_dir, "__wrapped__") else 
 
 s = cfg.Settings()
 check("defaults have a 12-turn cap", s.max_tool_turns == 12)
-check("provider order is gemini then groq", s.provider_order == ["gemini", "groq"])
+check("groq leads on volume, gemini kept for vision", s.provider_order == ["groq", "gemini"])
 check("no llama in groq prefs", not any("llama" in m for m in s.groq_models),
       f"got {s.groq_models}")
 

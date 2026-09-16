@@ -61,10 +61,21 @@ class Settings:
             "gemini-flash-lite-latest",
         ]
     )
+    # Verified tool-capable on a free key on 2026-09-16. NOTE: groq/compound and
+    # compound-mini return "tool calling is not supported" - their agentic
+    # tooling is built in, not yours - so they are useless to this agent.
     groq_models: list[str] = field(
-        default_factory=lambda: ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+        default_factory=lambda: [
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "qwen/qwen3.8-27b",
+        ]
     )
-    provider_order: list[str] = field(default_factory=lambda: ["gemini", "groq"])
+    # Groq leads on volume: 1,000 requests/day and ~0.4s, versus Gemini's
+    # measured 20/day/model. Gemini is still required for anything visual -
+    # it is the only free provider that can see - and the router routes
+    # needs_vision past providers that cannot.
+    provider_order: list[str] = field(default_factory=lambda: ["groq", "gemini"])
 
     # --- agent --------------------------------------------------------------
     max_tool_turns: int = 12

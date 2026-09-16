@@ -71,9 +71,9 @@ The old `Backend/Model.py` Cohere router is retired by Phase 02.
 
 | Layer | Choice | Notes |
 |---|---|---|
-| Reasoning | Gemini Flash (free tier) | primary; multimodal, so vision is free |
-| Failover | Groq `openai/gpt-oss-120b` | on 429; 8K TPM is why it is not primary |
-| Vision | Gemini Flash image input | ~560–1,120 tokens per image, 1 request |
+| Reasoning | Groq `openai/gpt-oss-120b` | **primary** — ~1,000 req/day, ~0.5s |
+| Overflow | Gemini `gemini-3.6-flash` | only 20 req/day/model, so second not first |
+| Vision | Gemini Flash image input | **the only free provider that can see**; ~120 calls/day total |
 | Screen text | **`winsdk` → `Windows.Media.Ocr`** | verified 13ms, zero install, **returns per-word boxes** |
 | STT | Groq `whisper-large-v3-turbo` | free, 20 RPM / 2,000 RPD, separate quota pool |
 | STT offline | `winsdk` → `SpeechRecognizer` | built into Windows |
@@ -88,8 +88,10 @@ Dev environment: `.venv/` in the repo root (gitignored). Python 3.11.9.
 Tests:
 - `tests/test_phase1.py` — 45 checks, **no API key needed** (settings round-trip, both adapters'
   message/tool conversion, router failover). Add a `test_phaseN.py` per phase and keep them key-free.
-- `tests/smoke_live.py` — 15 checks against the real API, needs a Gemini key, spends ~6 free requests.
-  Covers what fakes cannot: real wire formats, the tool-call round trip, and vision.
+- `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15
+  free requests (mind the 20/day/model Gemini cap when re-running).
+  Covers what fakes cannot: real wire formats, the tool-call round trip, vision, and the
+  cross-provider handoff that proves locally-held history survives a failover mid-conversation.
   **Run this after touching any adapter.** Every trap listed below was found here and by nothing else.
 Hardware: RTX 3050 Laptop 4GB, Ryzen 7 6800HS, 15.3GB RAM — enough for local *perception*,
 not for local *reasoning*. That split is the whole reason $0 works.
@@ -102,9 +104,24 @@ not for local *reasoning*. That split is the whole reason $0 works.
 - **`google-genai` 2.23.0** exposes both `client.models` (stateless) and `client.interactions`
   (server-side state). **Use `models.generate_content` with full local history** — server-side state
   cannot survive a failover to Groq mid-conversation.
-- **Gemini free-tier RPD is unconfirmed.** Google's docs defer to a per-account AI Studio page and
-  third-party sources disagree (250 vs 1,500/day for Flash). Read real limits from the API at startup;
-  do not hardcode a number.
+- **Gemini free tier is 20 requests per day, PER MODEL.** Measured from a live 429 on 2026-09-16:
+  `quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier, quotaValue: 20`. Not the 250-1,500
+  that third-party sources claim. Two things follow, both verified:
+  - The quota really is **per model** — `gemini-3-flash-preview` answered fine while
+    `gemini-3.6-flash` was exhausted. Rotating across the ~6 working ids turns 20/day into ~120/day,
+    which is why the adapter demotes a model on 429 and moves to the next instead of failing.
+  - It really is **per day** — after waiting 65s an exhausted model still 429'd. The response's
+    shrinking "retry in 25s -> 17s" countdown is misleading; ignore it for quota errors.
+- **Groq carries the volume; Gemini is the eyes.** Groq allows ~1,000 requests/day per model at
+  ~0.4-0.5s, versus Gemini's 20. So `provider_order` is `["groq", "gemini"]`. Gemini stays essential
+  because it is the only free provider that can see, and the router sends `needs_vision` past
+  providers that cannot. Practical ceiling: roughly 200 text tasks/day, and **~120 vision calls/day**
+  — vision is the genuinely scarce resource, so use Windows OCR first and Gemini only when the
+  question needs seeing rather than reading.
+- **Groq Compound cannot call your tools.** `groq/compound` and `compound-mini` return
+  `400: tool calling is not supported` — their agentic tooling is built in, not yours. Tool-capable
+  free ids: `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.8-27b`. `allam-2-7b` cannot
+  either.
 
 ### Gemini, measured live on 2026-09-16 with a real free-tier key
 
