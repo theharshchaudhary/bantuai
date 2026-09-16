@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core import config as cfg
 from core.agent import Agent, Event
 from core.memory import Memory
+from core.reminders import ReminderScheduler
 from core.providers.base import ProviderError
 from core.providers.router import build_router
 from core.tools import builtin
@@ -117,6 +118,18 @@ def build() -> tuple[Agent, cfg.Settings]:
         except Exception as e:
             logging.getLogger("bantu").warning("screen vision unavailable: %s", e)
 
+    # Reminders fire on a daemon thread; how they are announced is platform
+    # specific, so the portable scheduler takes a callback.
+    def announce(title: str, body: str) -> None:
+        print(f"\n{YELLOW}  [{title}] {body}{RESET}", flush=True)
+        try:
+            _REGISTRY.tools["notify"].fn(title=title, message=body)
+        except Exception:
+            pass
+
+    scheduler = ReminderScheduler(memory, announce)
+    scheduler.start()
+
     agent = Agent(
         router=router,
         registry=_REGISTRY,
@@ -132,6 +145,7 @@ HELP = """\
   /tools     list registered tools and their permission tier
   /status    provider quota and cooldown state
   /facts     what Bantu remembers about you
+  /reminders what is scheduled
   /new       start a fresh conversation
   /quit      exit
 """
@@ -181,6 +195,16 @@ def main() -> int:
         if line == "/facts":
             facts = agent.memory.all_facts()
             print("\n".join(f"  - {f}" for f in facts) if facts else "  (nothing yet)")
+            continue
+        if line == "/reminders":
+            items = agent.memory.pending_reminders()
+            if items:
+                from core.reminders import describe
+
+                for r in items:
+                    print(f"  #{r['id']}  {describe(r['due_at'])}  {r['message']}")
+            else:
+                print("  (nothing scheduled)")
             continue
         if line == "/new":
             agent.memory.new_conversation()

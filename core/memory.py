@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_calls    TEXT,
     tool_call_id  TEXT,
     name          TEXT,
+    image_count   INTEGER NOT NULL DEFAULT 0,
     created_at    REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation, id);
@@ -51,6 +52,15 @@ END;
 CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
     INSERT INTO facts_fts(facts_fts, rowid, text) VALUES('delete', old.id, old.text);
 END;
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    message    TEXT NOT NULL,
+    due_at     REAL NOT NULL,
+    created_at REAL NOT NULL,
+    fired_at   REAL
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(fired_at, due_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content, content='messages', content_rowid='id'
@@ -91,9 +101,18 @@ class Memory:
         self.db = sqlite3.connect(str(self.path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.commit()
         if not self.conversation:
             self.conversation = uuid.uuid4().hex[:12]
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a database was first created."""
+        have = {r["name"] for r in self.db.execute("PRAGMA table_info(messages)")}
+        if "image_count" not in have:
+            self.db.execute(
+                "ALTER TABLE messages ADD COLUMN image_count INTEGER NOT NULL DEFAULT 0"
+            )
 
     def close(self) -> None:
         self.db.close()
@@ -107,7 +126,7 @@ class Memory:
     def append(self, m: Message) -> None:
         self.db.execute(
             "INSERT INTO messages (conversation, role, content, tool_calls, tool_call_id, name,"
-            " created_at) VALUES (?,?,?,?,?,?,?)",
+            " image_count, created_at) VALUES (?,?,?,?,?,?,?,?)",
             (
                 self.conversation,
                 m.role,
@@ -119,6 +138,7 @@ class Memory:
                 else None,
                 m.tool_call_id,
                 m.name,
+                len(m.images),
                 time.time(),
             ),
         )
@@ -148,9 +168,16 @@ class Memory:
         if r["tool_calls"]:
             for d in json.loads(r["tool_calls"]):
                 calls.append(ToolCall(id=d["id"], name=d["name"], arguments=d["arguments"]))
+        content = r["content"]
+        # Image bytes are deliberately not persisted - they would bloat the database
+        # and re-billing them every turn forever is wasteful. A note keeps later
+        # history coherent; the live bytes are re-attached for the current run only.
+        n = r["image_count"] if "image_count" in r.keys() else 0
+        if n:
+            content = f"{content or ''}\n[{n} image(s) were attached to this message]"
         return Message(
             role=r["role"],
-            content=r["content"],
+            content=content,
             tool_calls=calls,
             tool_call_id=r["tool_call_id"],
             name=r["name"],
@@ -205,6 +232,41 @@ class Memory:
         cur = self.db.execute("DELETE FROM facts WHERE text = ?", (text,))
         self.db.commit()
         return "Forgotten." if cur.rowcount else "No such fact."
+
+    # --- reminders ----------------------------------------------------------
+
+    def add_reminder(self, message: str, due_at: float) -> int:
+        cur = self.db.execute(
+            "INSERT INTO reminders (message, due_at, created_at) VALUES (?,?,?)",
+            (message.strip(), due_at, time.time()),
+        )
+        self.db.commit()
+        return int(cur.lastrowid)
+
+    def pending_reminders(self) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            "SELECT id, message, due_at FROM reminders WHERE fired_at IS NULL ORDER BY due_at"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def due_reminders(self, now: float | None = None) -> list[dict[str, Any]]:
+        rows = self.db.execute(
+            "SELECT id, message, due_at FROM reminders WHERE fired_at IS NULL AND due_at <= ?"
+            " ORDER BY due_at",
+            (now if now is not None else time.time(),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_fired(self, reminder_id: int) -> None:
+        self.db.execute("UPDATE reminders SET fired_at=? WHERE id=?", (time.time(), reminder_id))
+        self.db.commit()
+
+    def cancel_reminder(self, reminder_id: int) -> bool:
+        cur = self.db.execute(
+            "DELETE FROM reminders WHERE id=? AND fired_at IS NULL", (reminder_id,)
+        )
+        self.db.commit()
+        return cur.rowcount > 0
 
     def search_messages(self, query: str, limit: int = 10) -> list[str]:
         q = _fts_query(query)

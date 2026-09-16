@@ -119,6 +119,14 @@ class Agent:
 
         for turn in range(max_turns):
             history = self.memory.history()
+            # Memory stores no image bytes, so re-attach this run's images to the
+            # user turn they belong to. Without this the model is handed a
+            # question about a picture it was never shown.
+            if images:
+                for m in reversed(history):
+                    if m.role == "user":
+                        m.images = images
+                        break
             needs_vision = any(m.images for m in history)
             self._emit("thinking")
 

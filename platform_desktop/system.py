@@ -17,7 +17,7 @@ from pathlib import Path
 
 from core.tools.registry import Tier, ToolError, ToolRegistry
 
-from .paths import human_size
+from .paths import human_size, parse_region
 
 #: Media virtual-key codes. Spelled out rather than taken from win32con,
 #: which does not define VK_MEDIA_STOP - referencing it crashed every action.
@@ -369,13 +369,7 @@ def register(reg: ToolRegistry) -> None:
         """
         from PIL import ImageGrab
 
-        box = None
-        if region:
-            parts = [p.strip() for p in region.split(",")]
-            if len(parts) != 4 or not all(p.lstrip("-").isdigit() for p in parts):
-                raise ToolError("region must be 'left,top,right,bottom' in pixels")
-            box = tuple(int(p) for p in parts)
-
+        box = parse_region(region)
         if path:
             from .paths import guard_write
 

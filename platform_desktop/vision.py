@@ -14,6 +14,8 @@ from typing import Any
 from core.providers.base import Image, Message
 from core.tools.registry import Tier, ToolError, ToolRegistry
 
+from .paths import parse_region
+
 #: Screens are wide; downscaling keeps the image inside one billing block.
 MAX_EDGE = 1600
 
@@ -21,14 +23,7 @@ MAX_EDGE = 1600
 def capture(region: str = "") -> Image:
     from PIL import ImageGrab
 
-    box = None
-    if region:
-        parts = [p.strip() for p in region.split(",")]
-        if len(parts) != 4 or not all(p.lstrip("-").isdigit() for p in parts):
-            raise ToolError("region must be 'left,top,right,bottom' in pixels")
-        box = tuple(int(p) for p in parts)
-
-    img = ImageGrab.grab(bbox=box, all_screens=True)
+    img = ImageGrab.grab(bbox=parse_region(region), all_screens=True)
     if max(img.size) > MAX_EDGE:
         ratio = MAX_EDGE / max(img.size)
         img = img.resize((int(img.width * ratio), int(img.height * ratio)))

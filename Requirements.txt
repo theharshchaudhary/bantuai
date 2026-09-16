@@ -14,6 +14,8 @@ pillow                  # screenshot encoding for vision
 # --- Phase 03-04: file and system tools -------------------------------------
 psutil                  # processes, CPU, memory, battery, disk
 pywin32                 # window management, clipboard, shell integration
+pycaw                   # system volume (needs comtypes)
+comtypes                # COM bindings pycaw depends on
 send2trash              # deletes go to the Recycle Bin, never a hard unlink
 watchdog                # filesystem events (also powers proactive triggers later)
 AppOpener               # launch installed apps by name

@@ -113,6 +113,19 @@ def guard_write(path: str) -> Path:
     return p
 
 
+def parse_region(region: str) -> tuple[int, int, int, int] | None:
+    """Parse a 'left,top,right,bottom' pixel box. Empty means the whole screen."""
+    if not region or not region.strip():
+        return None
+    parts = [p.strip() for p in region.split(",")]
+    if len(parts) != 4 or not all(p.lstrip("-").isdigit() for p in parts):
+        raise ToolError("region must be 'left,top,right,bottom' in pixels, e.g. '0,0,800,600'")
+    left, top, right, bottom = (int(p) for p in parts)
+    if right <= left or bottom <= top:
+        raise ToolError("region must have right > left and bottom > top")
+    return left, top, right, bottom
+
+
 def human_size(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or unit == "TB":

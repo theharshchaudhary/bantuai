@@ -9,7 +9,8 @@ from __future__ import annotations
 import datetime
 
 from ..memory import Memory
-from .registry import Tier, ToolRegistry
+from ..reminders import describe, parse_when
+from .registry import Tier, ToolError, ToolRegistry
 
 
 def register(reg: ToolRegistry, memory: Memory) -> None:
@@ -55,6 +56,49 @@ def register(reg: ToolRegistry, memory: Memory) -> None:
             fact: The exact fact text to remove.
         """
         return memory.forget(fact)
+
+    @reg.register(tier=Tier.AUTO, category="core")
+    def set_reminder(when: str, message: str) -> str:
+        """Schedule a reminder that will pop up and be spoken at a given time.
+
+        Call get_datetime first and work out the absolute time yourself, then
+        pass it as ISO 8601 (e.g. '2026-09-17T09:00'). 'in 20 minutes' also
+        works. Reminders survive restarting Bantu.
+
+        Args:
+            when: ISO 8601 date-time, or a relative form like 'in 30 minutes'.
+            message: What to say when it fires.
+        """
+        if not message.strip():
+            raise ToolError("a reminder needs a message")
+        try:
+            due = parse_when(when)
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        import time as _t
+
+        if due < _t.time() - 60:
+            raise ToolError(f"{when!r} is in the past. Check the current time with get_datetime.")
+        rid = memory.add_reminder(message, due)
+        return f"Reminder #{rid} set for {describe(due)}: {message}"
+
+    @reg.register(tier=Tier.AUTO, category="core")
+    def list_reminders() -> str:
+        """List reminders that have not fired yet."""
+        items = memory.pending_reminders()
+        if not items:
+            return "No reminders pending."
+        return "\n".join(f"  #{r['id']}  {describe(r['due_at'])}  {r['message']}" for r in items)
+
+    @reg.register(tier=Tier.AUTO, category="core")
+    def cancel_reminder(reminder_id: int) -> str:
+        """Cancel a pending reminder by its number, as shown by list_reminders.
+
+        Args:
+            reminder_id: The reminder's number.
+        """
+        ok = memory.cancel_reminder(reminder_id)
+        return f"Cancelled reminder #{reminder_id}." if ok else f"No pending reminder #{reminder_id}."
 
     @reg.register(tier=Tier.AUTO, category="core")
     def search_history(query: str) -> str:

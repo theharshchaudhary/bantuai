@@ -76,14 +76,17 @@ Run it: `.venv/Scripts/python.exe main.py` (add `-v` for tool output, or pass a 
 - **files** (15): `search_files`, `read_file`, `read_document`, `list_directory`, `file_info`,
   `disk_usage` are AUTO; `write_file`, `edit_file`, `move_file`, `copy_file`, `delete_file`,
   `create_folder`, `organize_folder`, `compress`, `extract` need confirmation.
+- **core** now also has `set_reminder`, `list_reminders`, `cancel_reminder`.
 - **system** (17): `open_app`, `list_running_apps`, `list_windows`, `focus_window`, `system_info`,
   `get_clipboard`, `set_clipboard`, `get_volume`, `set_volume`, `mute`, `media_control`, `notify`,
   `open_url`, `take_screenshot` are AUTO; `close_app`, `lock_screen`, `power_action` confirm.
 - **shell** (1): `run_powershell` — always CONFIRM, with a deny-list backstop.
 
-**Deferred, not forgotten:** `set_reminder` / `list_reminders` / `cancel_reminder` were in the v1
-scope but need a persistent background scheduler, which is the same machinery the proactive trigger
-engine needs. They land with that rather than as a one-off thread.
+Reminders (`set_reminder`, `list_reminders`, `cancel_reminder`) live in `core/reminders.py`:
+a daemon thread polls SQLite, so they survive a restart. `parse_when` accepts ISO 8601 or
+"in N minutes" and **refuses vague phrasing** rather than guessing — a reminder that fires at the
+wrong time is worse than one that is refused. The model is told to call `get_datetime` first and
+compute the absolute time itself.
 Tools default to `Tier.CONFIRM` when unspecified — a tool author who forgets to think about safety
 gets the cautious behaviour, not the dangerous one.
 
@@ -114,6 +117,8 @@ Tests:
   Bin semantics, zip-slip refusal, and that no hard delete is ever called).
 - `tests/test_phase4.py` — 57 checks, no API key needed (real read-only system calls, gating of
   disruptive tools, critical-process refusal, and 21 PowerShell deny-list categories).
+- `tests/test_fixes.py` — 34 checks guarding bugs that actually shipped: images surviving the
+  agent loop, database migration, reminders, multi-word screen matching, region parsing.
   Add a `test_phaseN.py` per phase and keep them key-free.
 - `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15
   free requests (mind the 20/day/model Gemini cap when re-running).

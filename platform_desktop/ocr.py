@@ -18,9 +18,27 @@ from typing import Any
 
 from core.tools.registry import Tier, ToolError, ToolRegistry
 
+from .paths import parse_region
+
 
 @dataclass
 class Word:
+    text: str
+    x: int
+    y: int
+    w: int
+    h: int
+    line: int = 0
+
+    @property
+    def center(self) -> tuple[int, int]:
+        return self.x + self.w // 2, self.y + self.h // 2
+
+
+@dataclass
+class Match:
+    """One or more adjacent words that together matched a query."""
+
     text: str
     x: int
     y: int
@@ -35,17 +53,7 @@ class Word:
 def _grab(region: str = "") -> Any:
     from PIL import ImageGrab
 
-    box = None
-    if region:
-        try:
-            parts = [int(p.strip()) for p in region.split(",")]
-        except ValueError as e:
-            raise ToolError(f"region must be 'left,top,right,bottom' in pixels: {e}") from e
-        if len(parts) != 4:
-            raise ToolError("region must have exactly four numbers: left,top,right,bottom")
-        box = tuple(parts)
-    img = ImageGrab.grab(bbox=box, all_screens=True)
-    return img
+    return ImageGrab.grab(bbox=parse_region(region), all_screens=True)
 
 
 async def _recognize(png_path: str) -> tuple[str, list[Word]]:
@@ -66,10 +74,10 @@ async def _recognize(png_path: str) -> tuple[str, list[Word]]:
     result = await engine.recognize_async(bitmap)
 
     words: list[Word] = []
-    for line in result.lines:
+    for li, line in enumerate(result.lines):
         for w in line.words:
             r = w.bounding_rect
-            words.append(Word(w.text, int(r.x), int(r.y), int(r.width), int(r.height)))
+            words.append(Word(w.text, int(r.x), int(r.y), int(r.width), int(r.height), li))
     return result.text or "", words
 
 
@@ -84,6 +92,45 @@ def ocr_screen(region: str = "") -> tuple[str, list[Word]]:
         raise
     except Exception as e:
         raise ToolError(f"OCR failed: {type(e).__name__}: {e}") from e
+
+
+def find_matches(words: list[Word], needle: str, max_span: int = 8) -> list[Match]:
+    """Locate a word or a multi-word phrase.
+
+    OCR splits text at every space, so a single-word search misses anything a
+    person would actually say ("Save As", "Sign in with Google"). This slides a
+    window over consecutive words within a line and merges their boxes, which is
+    what makes clicking by name work without a vision call.
+    """
+    target = " ".join(needle.lower().split())
+    if not target:
+        return []
+
+    out: list[Match] = []
+    seen: set[tuple[int, int, int, int]] = set()
+
+    for start in range(len(words)):
+        parts: list[Word] = []
+        for offset in range(max_span):
+            i = start + offset
+            if i >= len(words) or words[i].line != words[start].line:
+                break
+            parts.append(words[i])
+            joined = " ".join(p.text for p in parts).lower()
+            if target in joined:
+                x = min(p.x for p in parts)
+                y = min(p.y for p in parts)
+                w = max(p.x + p.w for p in parts) - x
+                h = max(p.y + p.h for p in parts) - y
+                key = (x, y, w, h)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(Match(" ".join(p.text for p in parts), x, y, w, h))
+                break
+            # Stop growing once the window can no longer become a prefix match.
+            if len(joined) > len(target) + 40:
+                break
+    return out
 
 
 # --- tools ------------------------------------------------------------------
@@ -110,29 +157,26 @@ def register(reg: ToolRegistry) -> None:
     def find_on_screen(text: str) -> str:
         """Locate on-screen text and return its pixel coordinates.
 
-        Use this to find a button or label before clicking it. Matching is
-        case-insensitive and partial.
+        Handles multi-word phrases such as 'Save As' or 'Sign in', not just
+        single words. Use it to find a button or label before clicking it.
+        Matching is case-insensitive and partial.
 
         Args:
             text: The word or phrase to look for.
         """
-        _, words = ocr_screen()
-        needle = text.strip().lower()
+        needle = text.strip()
         if not needle:
             raise ToolError("nothing to search for")
 
-        hits = [w for w in words if needle in w.text.lower()]
+        _, words = ocr_screen()
+        hits = find_matches(words, needle)
         if not hits:
-            # Try to match a phrase spread across adjacent words.
-            joined = " ".join(w.text.lower() for w in words)
-            if needle in joined:
-                return (
-                    f"{text!r} appears on screen but is split across words; "
-                    f"search for a single word from it instead."
-                )
-            return f"{text!r} was not found on screen."
-
+            return (
+                f"{text!r} is not visible on screen. Use read_screen to see what is "
+                f"actually there, or look_at_screen if the target is an icon rather than text."
+            )
         lines = [
-            f"- {w.text!r} at ({w.center[0]}, {w.center[1]}), box {w.w}x{w.h}" for w in hits[:10]
+            f"- {h.text!r} at ({h.center[0]}, {h.center[1]}), box {h.w}x{h.h}" for h in hits[:10]
         ]
-        return f"Found {len(hits)} match(es):\n" + "\n".join(lines)
+        more = f"\n... and {len(hits) - 10} more" if len(hits) > 10 else ""
+        return f"Found {len(hits)} match(es) for {text!r}:\n" + "\n".join(lines) + more
