@@ -93,6 +93,18 @@ def build() -> tuple[Agent, cfg.Settings]:
         except Exception as e:
             logging.getLogger("bantu").warning("file tools unavailable: %s", e)
         try:
+            from platform_desktop import system as sys_tools
+
+            sys_tools.register(_REGISTRY)
+        except Exception as e:
+            logging.getLogger("bantu").warning("system tools unavailable: %s", e)
+        try:
+            from platform_desktop import shell
+
+            shell.register(_REGISTRY)
+        except Exception as e:
+            logging.getLogger("bantu").warning("shell tool unavailable: %s", e)
+        try:
             from platform_desktop import ocr
 
             ocr.register(_REGISTRY)

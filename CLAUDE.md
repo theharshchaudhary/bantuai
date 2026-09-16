@@ -37,8 +37,8 @@ Owner: Harsh. Repo: `theharshchaudhary/bantuai`, branch `main`.
 | 01 | Foundation — config, keyring, provider interface, Gemini + Groq adapters, failover router | **done** |
 | 02 | Agent core — tool registry, the loop, SQLite memory, vision, Windows OCR, CLI | **done** |
 | 03 | File tools (15) — search, read, docs, write, organize, archives | **done** |
-| 04 | System + app tools (16), guarded PowerShell | **next** |
-| 05 | Web tools (7) — DuckDuckGo, Selenium | — |
+| 04 | System + app tools (17), guarded PowerShell | **done** |
+| 05 | Web tools (7) — DuckDuckGo, Selenium | **next** |
 | 06 | Voice — Groq Whisper, edge-tts, wake word, barge-in | — |
 | 07 | HUD overlay UI (PyQt5) — replaces the plain chat window | — |
 | 08 | GUI control — click-by-name via OCR boxes, vision fallback | — |
@@ -70,12 +70,20 @@ The old `Backend/Model.py` Cohere router is now retired.
 Run it: `.venv/Scripts/python.exe main.py` (add `-v` for tool output, or pass a one-shot query).
 `/tools`, `/status`, `/facts`, `/new` inside the REPL.
 
-**23 tools so far** — `/tools` lists them with their tier:
+**41 tools so far** — `/tools` lists them with their tier:
 - **core** (5, portable): `get_datetime`, `remember`, `recall`, `forget`, `search_history`
 - **screen** (3): `read_screen`, `find_on_screen` (Windows OCR), `look_at_screen` (Gemini vision)
 - **files** (15): `search_files`, `read_file`, `read_document`, `list_directory`, `file_info`,
   `disk_usage` are AUTO; `write_file`, `edit_file`, `move_file`, `copy_file`, `delete_file`,
   `create_folder`, `organize_folder`, `compress`, `extract` need confirmation.
+- **system** (17): `open_app`, `list_running_apps`, `list_windows`, `focus_window`, `system_info`,
+  `get_clipboard`, `set_clipboard`, `get_volume`, `set_volume`, `mute`, `media_control`, `notify`,
+  `open_url`, `take_screenshot` are AUTO; `close_app`, `lock_screen`, `power_action` confirm.
+- **shell** (1): `run_powershell` — always CONFIRM, with a deny-list backstop.
+
+**Deferred, not forgotten:** `set_reminder` / `list_reminders` / `cancel_reminder` were in the v1
+scope but need a persistent background scheduler, which is the same machinery the proactive trigger
+engine needs. They land with that rather than as a one-off thread.
 Tools default to `Tier.CONFIRM` when unspecified — a tool author who forgets to think about safety
 gets the cautious behaviour, not the dangerous one.
 
@@ -104,6 +112,8 @@ Tests:
   permission tiers, memory + FTS5, and the agent loop driven by a scripted provider).
 - `tests/test_phase3.py` — 70 checks, no API key needed (path guards, every file tool, Recycle
   Bin semantics, zip-slip refusal, and that no hard delete is ever called).
+- `tests/test_phase4.py` — 57 checks, no API key needed (real read-only system calls, gating of
+  disruptive tools, critical-process refusal, and 21 PowerShell deny-list categories).
   Add a `test_phaseN.py` per phase and keep them key-free.
 - `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15
   free requests (mind the 20/day/model Gemini cap when re-running).
@@ -211,6 +221,9 @@ Three tiers, enforced in the registry **before execution**:
 
 Blocklist: credential stores (`.env`, `id_rsa`, browser profiles), registry writes, System32 and
 Program Files writes, disk formatting, Defender/firewall changes, and **Bantu's own config and keys**.
+Enforced in two places: `platform_desktop/paths.py` for filesystem tools, and the `DENY` list in
+`platform_desktop/shell.py` for PowerShell. `close_app` additionally refuses a CRITICAL process list
+(lsass, explorer, winlogon, ...) even when the user approves.
 That last one matters most — without it, "set all tools to auto" is a valid tool call and the whole
 model collapses.
 
