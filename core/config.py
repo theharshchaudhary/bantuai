@@ -47,13 +47,18 @@ def user_data_dir() -> Path:
 @dataclass
 class Settings:
     # --- models -------------------------------------------------------------
-    # Preference order. The first id the provider actually offers wins; we never
-    # assume a specific id is still live (see CLAUDE.md on Groq dropping Llama).
+    # Preference order, verified callable on a free-tier key on 2026-09-16.
+    # Being *listed* is not enough — the models endpoint advertises ids that then
+    # 404 (gemini-2.5-*) or hang with a 504 (gemini-flash-latest, 3.7, 3.8).
+    # The adapter probes and demotes dead ids at runtime, so this is a starting
+    # preference, not a guarantee.
     gemini_models: list[str] = field(
         default_factory=lambda: [
-            "gemini-flash-latest",
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
+            "gemini-3.6-flash",  # newest full flash that answers reliably (~1.8s)
+            "gemini-3-flash-preview",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-flash-lite-latest",
         ]
     )
     groq_models: list[str] = field(
@@ -65,6 +70,15 @@ class Settings:
     max_tool_turns: int = 12
     temperature: float = 0.7
     max_output_tokens: int = 2048
+    #: Per-request HTTP timeout. Some advertised models never answer; without
+    #: this the app hangs rather than moving on.
+    request_timeout_s: int = 30
+    #: Gemini 3.x thinking budget, in tokens. 0 disables it.
+    #: Thinking is charged against max_output_tokens, so a small budget plus
+    #: thinking returns EMPTY text with finish_reason=MAX_TOKENS. It also cost
+    #: ~115 tokens on a one-word reply in testing, which matters on a free tier.
+    #: Raise this for genuinely hard multi-step reasoning.
+    thinking_budget: int = 0
 
     # --- voice --------------------------------------------------------------
     voice_enabled: bool = True

@@ -85,9 +85,12 @@ The old `Backend/Model.py` Cohere router is retired by Phase 02.
 
 Dev environment: `.venv/` in the repo root (gitignored). Python 3.11.9.
 
-Tests: `.venv/Scripts/python.exe tests/test_phase1.py` — 45 checks, no API key needed
-(settings round-trip, both adapters' message/tool conversion, router failover).
-Add a `test_phaseN.py` per phase and keep them key-free so they run anywhere.
+Tests:
+- `tests/test_phase1.py` — 45 checks, **no API key needed** (settings round-trip, both adapters'
+  message/tool conversion, router failover). Add a `test_phaseN.py` per phase and keep them key-free.
+- `tests/smoke_live.py` — 15 checks against the real API, needs a Gemini key, spends ~6 free requests.
+  Covers what fakes cannot: real wire formats, the tool-call round trip, and vision.
+  **Run this after touching any adapter.** Every trap listed below was found here and by nothing else.
 Hardware: RTX 3050 Laptop 4GB, Ryzen 7 6800HS, 15.3GB RAM — enough for local *perception*,
 not for local *reasoning*. That split is the whole reason $0 works.
 
@@ -102,6 +105,30 @@ not for local *reasoning*. That split is the whole reason $0 works.
 - **Gemini free-tier RPD is unconfirmed.** Google's docs defer to a per-account AI Studio page and
   third-party sources disagree (250 vs 1,500/day for Flash). Read real limits from the API at startup;
   do not hardcode a number.
+
+### Gemini, measured live on 2026-09-16 with a real free-tier key
+
+Four traps, all of which cost real debugging time. The adapter handles each — do not undo them.
+
+1. **A listed model is not a callable model.** `models.list()` advertises 41 ids. `gemini-2.5-flash`,
+   `gemini-2.5-pro` and `gemini-2.5-flash-lite` all return **404 "no longer available"**.
+   `gemini-flash-latest`, `gemini-3.7-flash` and `gemini-3.8-flash` **hang until timeout (504)**.
+   Every `pro`, `omni` and `nano-banana` id returns 429 — not on the free tier.
+   Verified working: **`gemini-3.6-flash`** (~1.3-1.8s, the default), `gemini-3-flash-preview`,
+   `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `gemini-flash-lite-latest`.
+2. **Set an HTTP timeout or the app hangs forever.** The SDK has no default. `HttpOptions(timeout=ms)`.
+3. **Thinking is charged against `max_output_tokens`.** With `max_output_tokens=32` and default
+   thinking, Gemini 3.x returns **empty text** with `finish_reason=MAX_TOKENS` — it spent the whole
+   budget thinking. It also burned ~115 thinking tokens on a one-word reply. Hence
+   `thinking_budget: int = 0` by default and a 256-token floor on output. Empty text plus MAX_TOKENS
+   is raised as a clear error rather than returned as a silent empty reply.
+4. **Gemini 3.x requires `thought_signature` when replaying tool calls.** Rebuilding a `function_call`
+   part without the signature the model returned gets a **400 INVALID_ARGUMENT**. It lives on the
+   `Part` (as `bytes`), not on the `FunctionCall`, so read `candidates[0].content.parts` rather than
+   the `response.function_calls` convenience list. It rides in `ToolCall.meta`.
+
+503 "high demand" happens in normal use, so a transient failure advances to the next preferred model
+immediately instead of failing the turn.
 - Windows OCR word boxes mean **"click Save" needs no model call** — a local lookup plus a mouse move.
   This makes most GUI control free.
 

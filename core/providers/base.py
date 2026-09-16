@@ -38,6 +38,15 @@ class TransientError(ProviderError):
     """Network blip, 5xx, timeout. Worth trying elsewhere."""
 
 
+class ModelUnavailable(ProviderError):
+    """This model id is gone or not callable on this account.
+
+    Distinct from RateLimited: the provider itself is fine, so the adapter
+    should drop to its next preferred model rather than failing over.
+    Providers list models they will then 404 on, so this is routine.
+    """
+
+
 class AllProvidersFailed(ProviderError):
     def __init__(self, failures: dict[str, Exception]):
         self.failures = failures
@@ -62,6 +71,11 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    #: Opaque per-provider data that must be echoed back when this call is
+    #: replayed in history. Gemini 3.x rejects a conversation whose function
+    #: call parts lost their `thought_signature`; other providers ignore this.
+    #: Excluded from equality so the dataclass stays hashable and comparable.
+    meta: dict[str, Any] = field(default_factory=dict, compare=False)
 
 
 @dataclass(frozen=True)

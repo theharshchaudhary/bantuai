@@ -16,6 +16,7 @@ from typing import Any
 
 from .base import (
     AuthError,
+    ModelUnavailable,
     LLMProvider,
     LLMResponse,
     Message,
@@ -40,6 +41,8 @@ def _classify(exc: Exception) -> ProviderError:
             except (ValueError, AttributeError):
                 pass
         return RateLimited(f"groq rate limit: {text}", retry_after=retry)
+    if code == 404 or "does not exist" in text or "model_not_found" in text:
+        return ModelUnavailable(f"groq model unavailable: {text}")
     if code in (401, 403) or "invalid_api_key" in text:
         return AuthError(f"groq auth: {text}")
     if code in (500, 502, 503, 504):
@@ -50,10 +53,15 @@ def _classify(exc: Exception) -> ProviderError:
 class GroqProvider(LLMProvider):
     name = "groq"
 
-    def __init__(self, api_key: str, model_preferences: list[str] | None = None):
+    def __init__(
+        self,
+        api_key: str,
+        model_preferences: list[str] | None = None,
+        timeout_s: int = 30,
+    ):
         from groq import Groq
 
-        self._client = Groq(api_key=api_key)
+        self._client = Groq(api_key=api_key, timeout=float(timeout_s))
         self._models_cache: list[str] | None = None
         self._model: str | None = None
         self._prefs = model_preferences or []

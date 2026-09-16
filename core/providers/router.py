@@ -153,9 +153,15 @@ def build_router(settings=None) -> ProviderRouter:
     from .groq import GroqProvider
 
     settings = settings or cfg.Settings.load()
+    t = getattr(settings, "request_timeout_s", 30)
     builders = {
-        "gemini": lambda k: GeminiProvider(k, settings.gemini_models),
-        "groq": lambda k: GroqProvider(k, settings.groq_models),
+        "gemini": lambda k: GeminiProvider(
+            k,
+            settings.gemini_models,
+            timeout_s=t,
+            thinking_budget=getattr(settings, "thinking_budget", 0),
+        ),
+        "groq": lambda k: GroqProvider(k, settings.groq_models, timeout_s=t),
     }
 
     providers: list[LLMProvider] = []
