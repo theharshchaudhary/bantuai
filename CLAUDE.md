@@ -34,8 +34,8 @@ Owner: Harsh. Repo: `theharshchaudhary/bantuai`, branch `main`.
 | Phase | What | State |
 |---|---|---|
 | 00 | Repo hygiene — `.gitignore`, `.env` untracked, `.env.example` | **done** (`251ad67`) |
-| 01 | Foundation — config, keyring, provider interface, Gemini + Groq adapters, failover router | **next** |
-| 02 | Agent core — tool registry, the loop, SQLite memory, vision, Windows OCR | — |
+| 01 | Foundation — config, keyring, provider interface, Gemini + Groq adapters, failover router | **done** |
+| 02 | Agent core — tool registry, the loop, SQLite memory, vision, Windows OCR | **next** |
 | 03 | File tools (14) | — |
 | 04 | System + app tools (16), guarded PowerShell | — |
 | 05 | Web tools (7) — DuckDuckGo, Selenium | — |
@@ -84,6 +84,10 @@ The old `Backend/Model.py` Cohere router is retired by Phase 02.
 | Search | DuckDuckGo | no key, no quota |
 
 Dev environment: `.venv/` in the repo root (gitignored). Python 3.11.9.
+
+Tests: `.venv/Scripts/python.exe tests/test_phase1.py` — 45 checks, no API key needed
+(settings round-trip, both adapters' message/tool conversion, router failover).
+Add a `test_phaseN.py` per phase and keep them key-free so they run anywhere.
 Hardware: RTX 3050 Laptop 4GB, Ryzen 7 6800HS, 15.3GB RAM — enough for local *perception*,
 not for local *reasoning*. That split is the whole reason $0 works.
 
