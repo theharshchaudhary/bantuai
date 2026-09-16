@@ -106,6 +106,12 @@ def build() -> tuple[Agent, cfg.Settings]:
         except Exception as e:
             logging.getLogger("bantu").warning("shell tool unavailable: %s", e)
         try:
+            from platform_desktop import web
+
+            web.register(_REGISTRY)
+        except Exception as e:
+            logging.getLogger("bantu").warning("web tools unavailable: %s", e)
+        try:
             from platform_desktop import ocr
 
             ocr.register(_REGISTRY)
@@ -218,5 +224,17 @@ def main() -> int:
                   f"{result.provider}/{result.model}{RESET}\n")
 
 
+def _cleanup() -> None:
+    try:
+        from platform_desktop import web
+
+        web.shutdown()
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    finally:
+        _cleanup()

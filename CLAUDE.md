@@ -38,8 +38,8 @@ Owner: Harsh. Repo: `theharshchaudhary/bantuai`, branch `main`.
 | 02 | Agent core — tool registry, the loop, SQLite memory, vision, Windows OCR, CLI | **done** |
 | 03 | File tools (15) — search, read, docs, write, organize, archives | **done** |
 | 04 | System + app tools (17), guarded PowerShell | **done** |
-| 05 | Web tools (7) — DuckDuckGo, Selenium | **next** |
-| 06 | Voice — Groq Whisper, edge-tts, wake word, barge-in | — |
+| 05 | Web tools (8) — DuckDuckGo, page fetch, Selenium | **done** |
+| 06 | Voice — Groq Whisper, edge-tts, wake word, barge-in | **next** |
 | 07 | HUD overlay UI (PyQt5) — replaces the plain chat window | — |
 | 08 | GUI control — click-by-name via OCR boxes, vision fallback | — |
 | 09 | Onboarding — first-run wizard, settings | — |
@@ -70,7 +70,7 @@ The old `Backend/Model.py` Cohere router is now retired.
 Run it: `.venv/Scripts/python.exe main.py` (add `-v` for tool output, or pass a one-shot query).
 `/tools`, `/status`, `/facts`, `/new` inside the REPL.
 
-**41 tools so far** — `/tools` lists them with their tier:
+**52 tools so far** — `/tools` lists them with their tier:
 - **core** (5, portable): `get_datetime`, `remember`, `recall`, `forget`, `search_history`
 - **screen** (3): `read_screen`, `find_on_screen` (Windows OCR), `look_at_screen` (Gemini vision)
 - **files** (15): `search_files`, `read_file`, `read_document`, `list_directory`, `file_info`,
@@ -81,6 +81,8 @@ Run it: `.venv/Scripts/python.exe main.py` (add `-v` for tool output, or pass a 
   `get_clipboard`, `set_clipboard`, `get_volume`, `set_volume`, `mute`, `media_control`, `notify`,
   `open_url`, `take_screenshot` are AUTO; `close_app`, `lock_screen`, `power_action` confirm.
 - **shell** (1): `run_powershell` — always CONFIRM, with a deny-list backstop.
+- **web** (8): `web_search`, `search_news`, `fetch_page`, `browser_open`, `browser_read` are AUTO;
+  `download_file`, `browser_click`, `browser_type` confirm — a click can submit or purchase.
 
 Reminders (`set_reminder`, `list_reminders`, `cancel_reminder`) live in `core/reminders.py`:
 a daemon thread polls SQLite, so they survive a restart. `parse_when` accepts ISO 8601 or
@@ -117,6 +119,7 @@ Tests:
   Bin semantics, zip-slip refusal, and that no hard delete is ever called).
 - `tests/test_phase4.py` — 57 checks, no API key needed (real read-only system calls, gating of
   disruptive tools, critical-process refusal, and 21 PowerShell deny-list categories).
+- `tests/test_phase5.py` — 37 checks; search and fetch hit the real network (both free).
 - `tests/test_fixes.py` — 34 checks guarding bugs that actually shipped: images surviving the
   agent loop, database migration, reminders, multi-word screen matching, region parsing.
   Add a `test_phaseN.py` per phase and keep them key-free.
@@ -255,9 +258,14 @@ refuses zip-slip paths.
 
 ## Legacy code
 
-`Backend/Chatbot.py`, `Backend/Model.py`, `Backend/RealtimeSearchEngine.py` are the old
-intent-router implementation. They call a decommissioned model and do not run. Delete each one when
-its replacement lands — git history keeps them. `Backend/Automation.py`, `ImageGeneration.py`,
-`SpeechToText.py`, `TextToSpeech.py`, `Frontend/GUI.py` and `Main.py` are empty stubs.
+All gone. The old `Backend/` intent-router modules were removed once their replacements landed;
+git history keeps them. `Frontend/Files/*.data` (the old PyQt file-based IPC) and
+`Data/ChatLog.json` are untracked.
 
-`Frontend/Graphics/` assets (including `Jarvis.gif`) are reused by the Phase 07 HUD.
+`Frontend/Graphics/` assets (including `Jarvis.gif`) survive and are reused by the Phase 07 HUD.
+
+**Known tension:** Selenium needs a browser driver, which it downloads on first use. That rubs
+against the zero-install rule, so the browser tools are lazy — nothing is fetched unless one is
+actually used, and a missing driver produces an explanation pointing at `web_search`/`fetch_page`
+rather than a crash. Revisit before packaging: either bundle a driver or ship without the three
+browser tools.
