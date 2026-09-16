@@ -101,9 +101,25 @@ not for local *reasoning*. That split is the whole reason $0 works.
 - Windows OCR word boxes mean **"click Save" needs no model call** — a local lookup plus a mouse move.
   This makes most GUI control free.
 
-## Language
+## Language and voice
 
-Bantu must speak **English, Hindi and Nepali**. Voices are chosen per language and per gender.
+Bantu must speak **English, Hindi and Nepali**. TTS is `edge-tts` — free, no API key, no download.
+
+**Chosen so far:**
+
+| | Voice | Status |
+|---|---|---|
+| Female | `ne-NP-HemkalaNeural` | confirmed for Nepali; Harsh likes the timbre |
+| Male | `ne-NP-SagarNeural` | confirmed for Nepali; Harsh likes the timbre |
+
+These are the only Nepali voices in the catalogue, so Nepali is settled. Open question is whether the
+same two carry English and Hindi acceptably — if they do, use them everywhere. **A single consistent
+voice identity is worth more than per-language accent accuracy**; three different voices for one
+assistant reads as three different assistants.
+
+Fallbacks if they do not hold up: Hindi `hi-IN-SwaraNeural` / `hi-IN-MadhurNeural` (native),
+English `en-US-AvaMultilingualNeural` / `en-US-AndrewMultilingualNeural` (flagship tier) or
+`en-IN-NeerjaExpressiveNeural` / `en-IN-PrabhatNeural` (Indian English).
 
 > The legacy `Backend/Chatbot.py` system prompt says *"Reply in only English, even if the question is
 > in Hindi."* **That rule is reversed.** Bantu replies in whatever language the user used.
@@ -136,7 +152,8 @@ Deletes go to the Recycle Bin, never a hard unlink.
 
 ## Open decisions
 
-- **Voice selection** — 11 samples generated across English/Hindi/Nepali; awaiting Harsh's pick.
+- **Voice for English and Hindi** — Nepali is settled (Hemkala / Sagar). Awaiting Harsh's ear on
+  whether those two also work for English and Hindi, or whether per-language voices are needed.
 - **Android APK** — wanted eventually, but ~35 of 41 tools are meaningless on a phone and a remote
   client needs a reachable core, which conflicts with "no server". Unresolved; v2 conversation.
 - **Code signing** — the `.exe` ships unsigned, so users see a SmartScreen warning. Certificate is a
