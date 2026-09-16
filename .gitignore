@@ -20,3 +20,7 @@ Frontend/Files/*.data
 Thumbs.db
 .vscode/
 .idea/
+
+# Dev environment
+.venv/
+voice_samples/
