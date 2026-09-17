@@ -97,6 +97,7 @@ class Run:
     turns: list = field(default_factory=list)       # (seconds, provider, model, tools_sent, input_tokens)
     tools: list = field(default_factory=list)       # (name, args, result)
     confirms: list = field(default_factory=list)    # (tool, args, approved)
+    waits: list = field(default_factory=list)       # seconds waited out for a free limit
     error: str = ""
     passed: bool = False
     reason: str = ""
@@ -130,6 +131,8 @@ def confirm(tool: Tool, args: dict) -> bool:
 def on_event(e) -> None:
     if e.kind == "tool_end":
         current.tools.append((e.tool, dict(e.arguments), (e.result or "")[:600]))
+    elif e.kind == "waiting":
+        current.waits.append(round(e.seconds, 1))
 
 
 agent.confirm = confirm
@@ -337,7 +340,7 @@ def main_run() -> None:
         slow = max((t[0] for t in current.turns), default=0)
         mark = "PASS" if current.passed else "FAIL"
         print(f"{mark}  {name:17} {current.seconds:5.1f}s  turns={len(current.turns)} "
-              f"slowest={slow:4.1f}s  tools={[t[0] for t in current.tools]}", flush=True)
+              f"slowest={slow:4.1f}s  waits={current.waits}  tools={[t[0] for t in current.tools]}", flush=True)
         if not current.passed:
             print(f"        expected: {why}")
             print(f"        reply   : {current.reply[:220]!r}")

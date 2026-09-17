@@ -229,11 +229,21 @@ marked as they land, each pinned by `tests/test_readiness.py`.
    - Live: a 3-step tool task on Gemini alone through Memory, and Groq starting a task then dropping
      out with Gemini finishing it, both complete. Re-run of the stalled tasks: no turn over 5s.
 
-   **Open, next:** with SDK retries off, a brief all-Groq rest now fails over to **Gemini**, spending
-   the vision budget Harsh chose to protect. Plan: for a short wait (~20s or less) the router waits
-   and the agent emits a visible "waiting" event; only long waits fail over. Also seen: weaker
-   fallback models (qwen) reach for `run_powershell` to list files, and a decline then ends the task,
-   so the prompt should say to prefer dedicated tools.
+   - **Short limits are waited out, visibly, not spent on Gemini.** With SDK retries off, a brief
+     all-Groq rest had started sending plain text to Gemini, spending the vision budget. The router
+     now waits for a provider that frees up within `max_wait_s` (20s), at most `MAX_WAITS` (2) times
+     per request, then fails over. Vision requests never wait for a provider that cannot see, and
+     a disabled provider is never waited for. The agent emits a `waiting` event with the seconds;
+     the HUD counts down ("free limit reached · trying again in 12s") and the CLI prints a line.
+     `router.interrupt()` ends a wait at once and refuses new ones, and the HUD calls it on quit,
+     so a wait cannot outlast the 3s thread join. Windows timers wake a few ms early, which left the
+     provider still resting and burned a second near-zero wait, hence `WAIT_SLACK_S`.
+     Live, 11 heavy tasks back to back: 28 of 29 turns on Groq's three models, **one** on Gemini
+     (after the wait budget ran out), waits mostly 1-6s, 2.0 min total (these tasks took over 6 min
+     in the baseline).
+
+   **Still open:** weaker fallback models (qwen) reach for `run_powershell` to list files, and a
+   decline then ends the task, so the prompt should say to prefer dedicated tools.
 
 Solid: capital, time, remember/recall across conversations, reminder set/list/cancel, create/edit a
 file, read a .docx, dry-run organize, a 4-step read-and-summarize, example.com heading, battery and

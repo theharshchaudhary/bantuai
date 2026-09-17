@@ -66,6 +66,8 @@ def make_printer(verbose: bool):
             print(f"{DIM}    {first}{RESET}", flush=True)
         elif e.kind == "declined":
             print(f"{YELLOW}    declined{RESET}", flush=True)
+        elif e.kind == "waiting":
+            print(f"{DIM}  … free limit reached, trying again in {e.seconds:.0f}s{RESET}", flush=True)
         elif e.kind == "error":
             print(f"{RED}  ! {e.text}{RESET}", flush=True)
 

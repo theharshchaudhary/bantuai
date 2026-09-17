@@ -503,6 +503,170 @@ except RateLimited:
 check("while all rest, no request is sent and no unverified model is tried", len(g._client.models.requests) == n)
 
 
+
+# --- a short limit is waited out, not spent on Gemini ------------------------
+# With the Groq SDK's silent retries gone, a brief all-Groq per-minute limit sent
+# plain text to Gemini, whose small daily quota is also the only free vision.
+
+import threading as _threading
+
+
+class Timed(LLMProvider):
+    """Plays a list of outcomes: an exception to raise, or None to answer."""
+
+    def __init__(self, name, outcomes=(), vision=False, forever=None):
+        self.name, self.outcomes, self.vision, self.forever = name, list(outcomes), vision, forever
+        self.calls = 0
+
+    def available_models(self):
+        return [self.name]
+
+    def resolve_model(self, preferences):
+        return self.name
+
+    def supports_vision(self):
+        return self.vision
+
+    def chat(self, messages, tools=None, system=None, **kw):
+        self.calls += 1
+        outcome = self.outcomes.pop(0) if self.outcomes else self.forever
+        if outcome is not None:
+            raise outcome
+        return LLMResponse(text=f"from {self.name}", provider=self.name, model=self.name)
+
+
+print("\n[the router waits for a preferred provider that is nearly free]")
+groq_p, gem = Timed("groq", [RateLimited("tpm", retry_after=0.3)]), Timed("gemini", vision=True)
+router, waits = ProviderRouter([groq_p, gem]), []
+t0 = _time.monotonic()
+r = router.chat([Message.user("x")], on_wait=lambda p, s: waits.append((p, s)))
+check("the preferred provider answers after a short wait", r.provider == "groq" and _time.monotonic() - t0 >= 0.25)
+check("Gemini was never asked", gem.calls == 0)
+check("the wait was announced once, with who and how long",
+      len(waits) == 1 and waits[0][0] == "groq" and 0.25 <= waits[0][1] <= 0.3, str(waits))
+
+groq_p, gem = Timed("groq", [RateLimited("tpm", retry_after=100)]), Timed("gemini", vision=True)
+router, waits = ProviderRouter([groq_p, gem]), []
+t0 = _time.monotonic()
+r = router.chat([Message.user("x")], on_wait=lambda p, s: waits.append((p, s)))
+check("a long wait fails over straight away", r.provider == "gemini" and _time.monotonic() - t0 < 0.2)
+check("...without announcing a wait", waits == [])
+
+groq_p, gem = Timed("groq", [RateLimited("tpm", retry_after=0.9)]), Timed("gemini", vision=True)
+router = ProviderRouter([groq_p, gem], max_wait_s=0.5)
+check("beyond max_wait_s the next provider answers", router.chat([Message.user("x")]).provider == "gemini")
+_time.sleep(0.5)
+waits = []
+r = router.chat([Message.user("y")], on_wait=lambda p, s: waits.append((p, s)))
+check("once the rest is short, the next request waits for it instead",
+      r.provider == "groq" and gem.calls == 1 and len(waits) == 1, f"{r.provider} gem={gem.calls} {waits}")
+
+groq_p, gem = Timed("groq", forever=RateLimited("tpm", retry_after=0.1)), Timed("gemini", vision=True)
+router, waits = ProviderRouter([groq_p, gem]), []
+r = router.chat([Message.user("x")], on_wait=lambda p, s: waits.append((p, s)))
+check("a provider that keeps asking for more is waited for only twice", len(waits) == 2, str(waits))
+check("...then the next provider answers", r.provider == "gemini")
+
+groq_p, gem = Timed("groq", forever=RateLimited("tpm", retry_after=0.2)), Timed("gemini", vision=True)
+router, waits = ProviderRouter([groq_p, gem]), []
+router.chat([Message.user("warm up")])  # leaves groq resting briefly
+r = router.chat([Message.user("look")], needs_vision=True, on_wait=lambda p, s: waits.append((p, s)))
+check("a vision request never waits for a provider that cannot see", r.provider == "gemini" and waits == [])
+
+bad, gem = Timed("groq", [AuthError("bad key")]), Timed("gemini", vision=True)
+router = ProviderRouter([bad, gem])
+router.chat([Message.user("x")])
+waits = []
+router.chat([Message.user("y")], on_wait=lambda p, s: waits.append((p, s)))
+check("a disabled provider is never waited for", waits == [] and bad.calls == 1)
+
+groq_p = Timed("groq", forever=RateLimited("tpm", retry_after=15))
+router, outcome = ProviderRouter([groq_p]), {}
+
+
+def call_in_thread():
+    t = _time.monotonic()
+    try:
+        router.chat([Message.user("x")])
+        outcome["result"] = "answered"
+    except ProviderError as e:
+        outcome["result"] = str(e)
+    outcome["seconds"] = _time.monotonic() - t
+
+
+th = _threading.Thread(target=call_in_thread)
+th.start()
+_time.sleep(0.2)
+router.interrupt()
+th.join(3)
+check("quitting cuts a wait short", not th.is_alive() and outcome.get("seconds", 99) < 1.0, str(outcome))
+check("...and says why", "stopped while waiting" in outcome.get("result", ""), str(outcome))
+t0 = _time.monotonic()
+try:
+    router.chat([Message.user("again")])
+except ProviderError:
+    pass
+check("after quitting, no new wait starts", _time.monotonic() - t0 < 0.5)
+
+print("\n[the agent tells the UI it is waiting]")
+events = []
+agent = Agent(ProviderRouter([Timed("groq", [RateLimited("tpm", retry_after=0.2)]), Timed("gemini", vision=True)]),
+              ToolRegistry(), Memory(Path(tempfile.mkdtemp()) / "w.db"), S(), on_event=events.append)
+res = agent.run("hello")
+waiting = [e for e in events if e.kind == "waiting"]
+check("a waiting event is emitted with the seconds", len(waiting) == 1 and 0.1 < waiting[0].seconds <= 0.2,
+      str([(e.kind, e.seconds) for e in events]))
+check("...and the preferred provider still answers", res.provider == "groq", res.provider)
+
+
+print("\n[the HUD counts the wait down, and quitting does not hang on it]")
+import os as _os
+
+_os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PyQt5.QtWidgets import QApplication
+
+from ui.app import BantuApp
+
+_app = QApplication.instance() or QApplication([])
+
+
+def pump_until(cond, timeout=5.0):
+    end = _time.monotonic() + timeout
+    while _time.monotonic() < end:
+        _app.processEvents()
+        if cond():
+            return True
+        _time.sleep(0.01)
+    return False
+
+
+def hud_with(provider):
+    agent = Agent(ProviderRouter([provider]), ToolRegistry(), Memory(Path(tempfile.mkdtemp()) / "hud.db"), S())
+    return BantuApp(agent, S(), install_hotkey=False, show_tray=False)
+
+
+hud = hud_with(Timed("groq", [RateLimited("tpm", retry_after=1.6)]))
+hud.ask("hello")
+check("the status shows a countdown while waiting",
+      pump_until(lambda: "trying again in" in hud.panel.status.text()), hud.panel.status.text())
+first = hud.panel.status.text()
+check("...which counts down", pump_until(lambda: hud.panel.status.text() not in (first, "")
+                                          and "trying again in" in hud.panel.status.text(), 2.0),
+      f"{first} -> {hud.panel.status.text()}")
+check("the answer arrives after the wait", pump_until(lambda: not hud.busy, 5.0))
+check("...and the countdown stops", not hud._wait_timer.isActive() and "trying again" not in hud.panel.status.text(),
+      hud.panel.status.text())
+hud.shutdown()
+
+hud = hud_with(Timed("groq", forever=RateLimited("tpm", retry_after=15)))
+hud.ask("hello")
+pump_until(lambda: "trying again in" in hud.panel.status.text())
+t0 = _time.monotonic()
+hud.shutdown()
+check("quitting mid-wait does not hang", _time.monotonic() - t0 < 2.0, f"{_time.monotonic() - t0:.1f}s")
+check("...the worker thread stopped", not hud.agent_thread.isRunning())
+
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 for f in FAIL:
     print("  FAILED:", f)

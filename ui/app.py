@@ -10,7 +10,9 @@ has not answered never times out into a yes.
 from __future__ import annotations
 
 import logging
+import math
 import threading
+import time
 from typing import Any
 
 from PyQt5.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
@@ -165,6 +167,13 @@ class BantuApp(QObject):
         self._hotkey_pressed.connect(self.listen)
         self.announced.connect(self._on_announced)
 
+        # A free-tier limit is waited out rather than spending Gemini's vision
+        # budget; count it down so a pause never looks like a freeze.
+        self._wait_until = 0.0
+        self._wait_timer = QTimer(self)
+        self._wait_timer.setInterval(250)
+        self._wait_timer.timeout.connect(self._tick_wait)
+
         # GUI tools run on the worker thread and must never screenshot or click
         # Bantu's own panel. A blocking queued connection makes the worker wait
         # until the UI thread has really hidden it, so no capture races the hide.
@@ -250,7 +259,13 @@ class BantuApp(QObject):
     # --- agent events (UI thread) -------------------------------------------
 
     def _on_event(self, ev: Event) -> None:
-        if ev.kind == "thinking":
+        if ev.kind != "waiting":
+            self._wait_timer.stop()
+        if ev.kind == "waiting":
+            self._wait_until = time.monotonic() + ev.seconds
+            self._tick_wait()
+            self._wait_timer.start()
+        elif ev.kind == "thinking":
             self._set_state(State.THINKING, "thinking…")
         elif ev.kind == "tool_start":
             self._chips.append(self.panel.add_tool(ev.tool, ev.arguments))
@@ -265,6 +280,14 @@ class BantuApp(QObject):
                 chip.set_result("declined by you", ok=False)
         elif ev.kind == "error":
             self._set_state(State.ERROR, "failed")
+
+    def _tick_wait(self) -> None:
+        left = math.ceil(self._wait_until - time.monotonic())
+        if left <= 0:
+            self._wait_timer.stop()
+            self.panel.set_status("thinking…")
+        else:
+            self.panel.set_status(f"free limit reached · trying again in {left}s")
 
     def _pending_chip(self, tool: str):
         """Oldest chip for this tool still awaiting a result."""
@@ -306,6 +329,7 @@ class BantuApp(QObject):
 
     def _on_finished(self, text: str) -> None:
         self.busy = False
+        self._wait_timer.stop()
         if self._stepped_aside:
             # Come back once the work on screen is done, to show the result.
             self._stepped_aside = False
@@ -485,6 +509,10 @@ class BantuApp(QObject):
                 pass
         if self._gui is not None:
             self._gui.remove_before_action(self._step_aside)
+        self._wait_timer.stop()
+        router = getattr(self.agent, "router", None)
+        if hasattr(router, "interrupt"):
+            router.interrupt()   # a free-limit wait would otherwise outlast the thread join
         self.worker.close()      # a pending confirmation would otherwise hang the thread
         if self.speaker:
             self.speaker.shutdown()

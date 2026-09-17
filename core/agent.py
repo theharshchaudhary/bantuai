@@ -63,11 +63,13 @@ SKIPPED_AFTER_DECLINE = "Not run: the user said no to an earlier step of this re
 class Event:
     """Something worth showing in the UI as the agent works."""
 
-    kind: str  # thinking | tool_start | tool_end | text | error | declined
+    kind: str  # thinking | waiting | tool_start | tool_end | text | error | declined
     text: str = ""
     tool: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
     result: str = ""
+    #: waiting only: how long until the provider is free again.
+    seconds: float = 0.0
 
 
 EventFn = Callable[[Event], None]
@@ -166,6 +168,7 @@ class Agent:
                     temperature=temp,
                     max_output_tokens=budget,
                     needs_vision=needs_vision,
+                    on_wait=self._waiting,
                 )
             except ToolNotLoaded as e:
                 tool = self.registry.tools.get(e.tool_name)
@@ -219,6 +222,9 @@ class Agent:
             stopped_early=True,
         )
 
+    def _waiting(self, provider: str, seconds: float) -> None:
+        self._emit("waiting", text=f"{provider} free limit", seconds=seconds)
+
     def _run_one(self, call: ToolCall) -> None:
         tool = self.registry.tools.get(call.name)
         self._emit("tool_start", tool=call.name, arguments=call.arguments)
@@ -262,6 +268,7 @@ class Agent:
                 system=system + AFTER_DECLINE.format(user=self._user),
                 temperature=temp,
                 max_output_tokens=budget,
+                on_wait=self._waiting,
             )
             # A call made anyway is ignored: it could not be answered, and
             # storing it without a result would break the next request.

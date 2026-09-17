@@ -5,14 +5,21 @@ failure and remembering a cooldown so an exhausted provider is skipped rather
 than re-hit on every turn. Auth failures disable a provider for the session —
 a bad key will not fix itself.
 
+A provider that will be free again within `max_wait_s` is waited for instead of
+skipped. Order is preference: Groq first because it has volume, Gemini second
+because its small daily quota is also the only free vision. Skipping Groq over a
+15-second per-minute limit would spend that vision budget on plain text.
+
 Failing over mid-conversation only works because history is held locally.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 from .base import (
     AllProvidersFailed,
@@ -33,6 +40,21 @@ log = logging.getLogger("bantu.router")
 DEFAULT_COOLDOWN = 60.0
 #: A provider whose daily quota is gone should not be retried every minute.
 LONG_COOLDOWN = 900.0
+#: A preferred provider this close to free is waited for rather than skipped.
+MAX_WAIT_S = 20.0
+#: Waits per request, so a provider that keeps asking for more cannot stall forever.
+MAX_WAITS = 2
+#: Added to every wait. Windows timers wake a few ms early, which left the provider
+#: still resting and cost a second, near-zero wait out of MAX_WAITS.
+WAIT_SLACK_S = 0.05
+
+#: Told (provider name, seconds) before the router sleeps.
+WaitFn = Callable[[str, float], None]
+
+
+class _Wait(Exception):
+    def __init__(self, provider: str, seconds: float):
+        self.provider, self.seconds = provider, seconds
 
 
 @dataclass
@@ -51,7 +73,9 @@ class _State:
 @dataclass
 class ProviderRouter:
     providers: list[LLMProvider]
+    max_wait_s: float = MAX_WAIT_S
     _states: list[_State] = field(init=False, default_factory=list)
+    _interrupted: threading.Event = field(init=False, default_factory=threading.Event, repr=False)
 
     def __post_init__(self) -> None:
         if not self.providers:
@@ -68,6 +92,10 @@ class ProviderRouter:
             raise ValueError("router needs at least one provider")
         self.providers = list(providers)
         self._states = [_State(p) for p in self.providers]
+
+    def interrupt(self) -> None:
+        """End any wait now and refuse to start new ones: the app is quitting."""
+        self._interrupted.set()
 
     # --- introspection ------------------------------------------------------
 
@@ -103,14 +131,43 @@ class ProviderRouter:
         temperature: float = 0.7,
         max_output_tokens: int = 2048,
         needs_vision: bool = False,
+        on_wait: WaitFn | None = None,
+    ) -> LLMResponse:
+        waits = 0
+        while True:
+            try:
+                return self._attempt(
+                    messages, tools, system, temperature, max_output_tokens, needs_vision,
+                    may_wait=waits < MAX_WAITS,
+                )
+            except _Wait as w:
+                waits += 1
+                log.info("waiting %.0fs for %s rather than failing over", w.seconds, w.provider)
+                if on_wait:
+                    on_wait(w.provider, w.seconds)
+                if self._interrupted.wait(w.seconds + WAIT_SLACK_S):
+                    raise ProviderError("stopped while waiting for a free limit") from None
+
+    def _attempt(
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec] | None,
+        system: str | None,
+        temperature: float,
+        max_output_tokens: int,
+        needs_vision: bool,
+        may_wait: bool,
     ) -> LLMResponse:
         failures: dict[str, Exception] = {}
 
         for s in self._states:
-            if not s.ready:
-                continue
             if needs_vision and not s.provider.supports_vision():
                 failures[s.provider.name] = ProviderError("cannot see images")
+                continue
+            if not s.ready:
+                wait = s.blocked_until - time.monotonic()
+                if may_wait and not s.disabled and 0 < wait <= self.max_wait_s:
+                    raise _Wait(s.provider.name, wait)
                 continue
 
             try:
@@ -137,6 +194,8 @@ class ProviderRouter:
                 s.blocked_until = time.monotonic() + cd
                 failures[s.provider.name] = e
                 log.warning("%s rate limited, cooling down %.0fs", s.provider.name, cd)
+                if may_wait and cd <= self.max_wait_s:
+                    raise _Wait(s.provider.name, cd) from None
 
             except AuthError as e:
                 s.failures += 1
