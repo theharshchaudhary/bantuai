@@ -473,6 +473,23 @@ real app is unaffected (one HUD per process): launched and quit 3 times, exit 0 
 build several HUDs must keep references to all of them.** Also: Settings tests now find tabs by name,
 since adding a tab shifts indexes.
 
+## Meeting notes spikes (R4, 2026-09-17) — measured, nothing built yet
+
+- **Groq Whisper free limits** (published): 20 req/min, 2,000 req/day, **7,200 audio seconds per hour
+  and 28,800 per day** (2h/hour, 8h/day), 25MB per file, 10s minimum billed. `verbose_json` with
+  `timestamp_granularities=["segment"]` returns timed segments. Its quota pool is separate from the
+  chat models: it still answered after every chat quota was spent.
+- **Accuracy and speed**, synthetic edge-tts speech: English 215s of a mock product meeting transcribed
+  in **0.9s**, 95.4% word accuracy (large-v3: 1.7s, 95.6%); Hindi 68s in 1.5s, 92.4% (large-v3: 4.2s,
+  86.7%, worse). Misses were spellings ("विशय" for "विषय", "RAM" for "Ram"). **Use turbo.**
+- **System audio capture works** with `soundcard` (314KB, WASAPI loopback; `sounddevice` 0.5.6 has no
+  loopback option): the PC's own output, i.e. the other side of a Zoom/Meet call, came back verbatim.
+  16kHz mono WAV is 1.92MB/minute, so 2-minute chunks are ~3.8MB.
+- **The microphone also hears the call through the speakers** (Realtek array transcribed the same
+  sentence) - attribute by comparing mic vs loopback energy per segment, not by transcribing twice.
+- **Whisper invents text from silence**: the default mic here (Iriun webcam, not connected) recorded
+  pure silence and Whisper returned "Thank you." Silent audio must be gated out before transcription.
+
 ## The stack — all verified working on this machine
 
 | Layer | Choice | Notes |
