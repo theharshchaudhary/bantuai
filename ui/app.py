@@ -23,6 +23,8 @@ from PyQt5.QtWidgets import QAction, QApplication, QMenu, QSystemTrayIcon
 from core.agent import Event
 from core.tools.registry import Tool
 
+from core.meetings import clock as meeting_clock
+
 from .widgets import ASSETS, ChatPanel, Orb, State
 
 log = logging.getLogger("bantu.ui")
@@ -153,6 +155,10 @@ class BantuApp(QObject):
     _hotkey_pressed = pyqtSignal()
     _step_aside_signal = pyqtSignal()
     announced = pyqtSignal(str, str)
+    #: From any thread: meeting progress ("writing the meeting summary") and the finished summary.
+    meeting_status = pyqtSignal(str)
+    meeting_done = pyqtSignal(int, str)
+    _meeting_started = pyqtSignal(str)
 
     def __init__(
         self,
@@ -166,8 +172,11 @@ class BantuApp(QObject):
         knowledge: Any = None,
         activity: Any = None,
         calendar: Any = None,
+        meeting_notes: Any = None,
     ):
         super().__init__()
+        self.meeting_notes = meeting_notes
+        self._record_action = None
         self.services = services
         self.knowledge = knowledge
         self.activity = activity
@@ -219,6 +228,19 @@ class BantuApp(QObject):
         self._wait_timer = QTimer(self)
         self._wait_timer.setInterval(250)
         self._wait_timer.timeout.connect(self._tick_wait)
+
+        # Meeting notes can start from the button, the tray, or a spoken request the agent
+        # handles, so the indicator follows the recorder itself rather than the button.
+        self.panel.record.setVisible(meeting_notes is not None)
+        self.panel.record_requested.connect(self.toggle_recording)
+        self.meeting_status.connect(self._on_meeting_status)
+        self.meeting_done.connect(self._on_meeting_done)
+        self._meeting_started.connect(self._on_meeting_started)
+        self._record_timer = QTimer(self)
+        self._record_timer.setInterval(1000)
+        self._record_timer.timeout.connect(self._sync_recording)
+        if meeting_notes is not None:
+            self._record_timer.start()
 
         # GUI tools run on the worker thread and must never screenshot or click
         # Bantu's own panel. A blocking queued connection makes the worker wait
@@ -481,6 +503,69 @@ class BantuApp(QObject):
         if self.orb.state is not State.ERROR:
             self._set_state(State.IDLE, "ready")
 
+    # --- meeting notes ------------------------------------------------------
+
+    def toggle_recording(self) -> None:
+        notes = self.meeting_notes
+        if notes is None:
+            return
+        if notes.recording:
+            self.panel.set_status("stopping the recording…")
+
+            def stop() -> None:
+                try:
+                    notes.stop()
+                except Exception as e:
+                    self.meeting_status.emit(f"could not stop: {e}")
+
+            threading.Thread(target=stop, name="bantu-meeting-stop", daemon=True).start()
+        else:
+            self.panel.set_status("starting the recording…")
+
+            def start() -> None:  # opening audio devices can take a moment; never on the UI thread
+                try:
+                    self._meeting_started.emit(notes.start().title)
+                except Exception as e:
+                    self._meeting_started.emit(f"error: {e}")
+
+            threading.Thread(target=start, name="bantu-meeting-start", daemon=True).start()
+        QTimer.singleShot(300, self._sync_recording)
+
+    def _on_meeting_started(self, result: str) -> None:
+        if not self.panel.isVisible():
+            self._show_panel()
+        if result.startswith("error: "):
+            self.panel.add_message(f"Meeting notes could not start: {result[len('error: '):]}", "assistant")
+        else:
+            self.panel.add_message(
+                f"Recording started: {result}. Let everyone know this meeting is being recorded. "
+                "Audio is transcribed as it goes and never kept.", "assistant")
+        self._sync_recording()
+
+    def _sync_recording(self) -> None:
+        notes = self.meeting_notes
+        on = bool(notes is not None and notes.recording and notes.meeting is not None)
+        self.orb.set_recording(on)
+        if on:
+            label = "PAUSED" if notes.paused else f"● REC {meeting_clock(time.time() - notes.meeting.started_at)}"
+            self.panel.set_recording(True, label)
+        else:
+            self.panel.set_recording(False)
+        if self._record_action is not None:
+            self._record_action.setText("Stop meeting notes" if on else "Start meeting notes")
+
+    def _on_meeting_status(self, text: str) -> None:
+        if text != "recording":
+            self.panel.set_status(f"meeting notes: {text}")
+
+    def _on_meeting_done(self, meeting_id: int, text: str) -> None:
+        self.panel.add_message(text, "assistant")
+        if self._tray is not None:
+            self._tray.showMessage("Meeting notes are ready", text.split("\n")[0], QSystemTrayIcon.Information, 8000)
+        if self.speaker and getattr(self.settings, "voice_enabled", True) and not self.busy:
+            self.speaker.speak("Your meeting notes are ready.")
+        self._sync_recording()
+
     def _on_announced(self, title: str, body: str) -> None:
         self.panel.add_message(f"⏰ {body}", "assistant")
         if self._tray is not None:
@@ -506,6 +591,11 @@ class BantuApp(QObject):
         speak = QAction("Speak now", menu)
         speak.triggered.connect(self.listen)
         menu.addAction(speak)
+
+        if self.meeting_notes is not None:
+            self._record_action = QAction("Start meeting notes", menu)
+            self._record_action.triggered.connect(self.toggle_recording)
+            menu.addAction(self._record_action)
 
         self._voice_action = QAction("Spoken replies", menu)
         self._voice_action.setCheckable(True)
@@ -564,6 +654,7 @@ class BantuApp(QObject):
             knowledge=self.knowledge,
             activity=self.activity,
             calendar=self.calendar,
+            meetings=self.meeting_notes.store if self.meeting_notes is not None else None,
         )
         dialog.applied.connect(self.apply_settings)
         self._settings_dialog = dialog
@@ -663,6 +754,10 @@ class BantuApp(QObject):
         if self._gui is not None:
             self._gui.remove_before_action(self._step_aside)
         self._wait_timer.stop()
+        self._record_timer.stop()
+        if self.meeting_notes is not None and self.meeting_notes.recording:
+            # Quitting mid-meeting keeps what was transcribed; summarize_meeting can finish it later.
+            self.meeting_notes.abandon()
         router = getattr(self.agent, "router", None)
         if hasattr(router, "interrupt"):
             router.interrupt()   # a free-limit wait would otherwise outlast the thread join

@@ -269,6 +269,19 @@ class Meetings:
             self.db.commit()
         return cur.rowcount > 0
 
+    def recover(self) -> int:
+        """Mark meetings left mid-recording or mid-summary by a quit or crash as interrupted.
+
+        What was transcribed stays; summarize_meeting can still write the summary.
+        """
+        with self._lock:
+            cur = self.db.execute(
+                "UPDATE meetings SET status='interrupted', ended_at=COALESCE(ended_at, started_at + COALESCE("
+                "(SELECT MAX(end_) FROM meeting_segments WHERE meeting_id = meetings.id), 0))"
+                " WHERE status IN ('recording', 'paused', 'processing')")
+            self.db.commit()
+        return cur.rowcount
+
     def prune(self, days: int = RETENTION_DAYS) -> int:
         """Delete transcripts older than `days` (0 keeps everything). Records saved from them stay."""
         if days <= 0:
@@ -587,32 +600,50 @@ class MeetingNotes:
             worker.join()
         return self.store.get(meeting.id)
 
+    def abandon(self) -> Meeting | None:
+        """For quitting mid-meeting: stop capture now and keep what was transcribed, without a summary."""
+        with self._lock:
+            meeting, recorder, session = self.meeting, self._recorder, self._session
+            self.meeting = self._recorder = self._session = None
+            self.paused = False
+        if meeting is None:
+            return None
+        try:
+            recorder.stop()
+        except Exception:
+            log.exception("recorder did not stop cleanly")
+        self.store.update(meeting.id, status="interrupted", ended_at=time.time())
+        return self.store.get(meeting.id)
+
     def _finish(self, meeting_id: int, session: MeetingSession) -> None:
         self.on_status("transcribing the last part")
         session.finish()
+        text = self.write_summary(meeting_id, failures=len(session.failures))
+        self.on_done(meeting_id, text)
+
+    def write_summary(self, meeting_id: int, failures: int = 0) -> str:
+        """Summarise a meeting's transcript, save what was decided, and return the text to show."""
         meeting = self.store.get(meeting_id)
         lines = self.store.transcript_lines(meeting_id)
         if not lines:
             self.store.update(meeting_id, status="done", summary="Nothing was said that could be transcribed.")
-            self.on_done(meeting_id, f"{meeting.title}: nothing was said that could be transcribed.")
-            return
+            return f"{meeting.title}: nothing was said that could be transcribed."
         self.on_status("writing the meeting summary")
         try:
             summary = summarize(lines, meeting.started_at, self.chat)
         except ProviderError as e:
-            note = f"The transcript is saved, but the summary could not be written: {e}"
             self.store.update(meeting_id, status="done", error=str(e), summary="")
-            self.on_done(meeting_id, f"{meeting.title} ({clock(meeting.duration)}). {note}")
-            return
+            return (f"{meeting.title} ({clock(meeting.duration)}). The transcript is saved, but the summary could "
+                    f"not be written: {e}")
         saved = save_to_memory(summary, self.records, meeting_id)
         if summary.title:
             self.store.update(meeting_id, title=summary.title)
         meeting = self.store.get(meeting_id)
         text = render_summary(meeting, summary, saved)
-        if session.failures:
-            text += f"\n\n{len(session.failures)} part(s) could not be transcribed."
-        self.store.update(meeting_id, status="done", summary=text)
-        self.on_done(meeting_id, text)
+        if failures:
+            text += f"\n\n{failures} part(s) could not be transcribed."
+        self.store.update(meeting_id, status="done", summary=text, error="")
+        return text
 
 
 # --- tools ----------------------------------------------------------------------------------
@@ -677,7 +708,24 @@ def register(reg: ToolRegistry, notes: MeetingNotes) -> None:
             return f"{meeting.describe()} is still being recorded."
         if meeting.status == "processing":
             return f"{meeting.describe()}: the summary is still being written."
-        return f"{meeting.describe()}\n\n{meeting.summary or 'No summary was written.'}"
+        if not meeting.summary:
+            return (f"{meeting.describe()}: no summary has been written, but the transcript is saved. "
+                    f"summarize_meeting can write one.")
+        return f"{meeting.describe()}\n\n{meeting.summary}"
+
+    @reg.register(tier=Tier.AUTO, category="meetings")
+    def summarize_meeting(meeting_id: int = 0) -> str:
+        """Write the summary of a recorded meeting that has none, e.g. one interrupted by closing Bantu.
+
+        Args:
+            meeting_id: The meeting number from list_meetings. 0 means the most recent.
+        """
+        meeting = _meeting_ref(store, meeting_id)
+        if meeting.status in ("recording", "paused", "processing"):
+            raise ToolError("that meeting is still being recorded or summarised")
+        if meeting.summary and meeting.status == "done" and not meeting.error:
+            return f"{meeting.describe()} already has a summary:\n\n{meeting.summary}"
+        return notes.write_summary(meeting.id)
 
     @reg.register(tier=Tier.AUTO, category="meetings")
     def search_meetings(query: str, since: str = "", until: str = "") -> str:

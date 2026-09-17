@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 os.environ["APPDATA"] = tempfile.mkdtemp(prefix="bantu_r4_appdata_")
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -460,6 +461,202 @@ lazy.enable_lazy_loading(base={"core"})
 catalog = next(sp for sp in lazy.specs() if sp.name == "load_tools").description
 check("meeting tools load on demand, with a catalog line naming recording and past meetings",
       "meetings:" in catalog and "record" in catalog and "past meetings" in catalog, catalog)
+
+# --- quitting mid-meeting, and finishing later ---------------------------------------------
+
+print("\n[interrupted meetings]")
+memory, store, records = fresh()
+left = [store.create("Left recording"), store.create("Left paused"), store.create("Left summarising")]
+store.update(left[1].id, status="paused")
+store.update(left[2].id, status="processing")
+store.add_segments(left[0].id, [Segment(10, 42, "We agreed on the budget.", "room")])
+finished = store.create("Finished")
+store.update(finished.id, status="done", ended_at=finished.started_at + 60, summary="Fine.")
+check("recovery marks meetings cut off by a quit or crash as interrupted", store.recover() == 3
+      and all(store.get(m.id).status == "interrupted" for m in left) and store.get(finished.id).status == "done")
+check("...ending them where the transcript ends", store.get(left[0].id).ended_at == left[0].started_at + 42)
+check("recovering twice changes nothing", store.recover() == 0)
+
+notes, store, records, made, done, status = build(
+    [chunk([LOUD] * 8, [QUIET] * 8)], lambda wav, prompt="": [Segment(0, 2, "We agreed to hire two engineers.")],
+    lambda messages, system: json.dumps({"title": "Hiring", "decisions": ["Hire two engineers."]}))
+meeting = notes.start("Hiring sync")
+abandoned = notes.abandon()
+check("quitting mid-meeting stops the recorder at once and keeps the meeting as interrupted",
+      made[0].events[-1] == "stop" and abandoned.status == "interrupted" and not notes.recording and done == [])
+check("abandoning with nothing recording is harmless", notes.abandon() is None)
+reg = ToolRegistry()
+register(reg, notes)
+store.add_segments(meeting.id, [Segment(0, 2, "We agreed to hire two engineers.", "room")])
+check("an interrupted meeting says a summary can still be written",
+      "summarize_meeting can write one" in reg.execute(ToolCall("g", "get_meeting", {})))
+written = reg.execute(ToolCall("s", "summarize_meeting", {}))
+check("summarize_meeting writes it later and saves what was decided",
+      "Hire two engineers." in written and store.get(meeting.id).status == "done"
+      and records.find(kind="decision")[0].text == "Hire two engineers.", written)
+check("asking again returns the summary rather than writing a second one",
+      reg.execute(ToolCall("s", "summarize_meeting", {})).startswith(f"{store.get(meeting.id).describe()} already has"))
+
+# --- the HUD -------------------------------------------------------------------------------------
+
+print("\n[recording from the HUD]")
+from PyQt5.QtWidgets import QApplication
+
+app = QApplication.instance() or QApplication([])
+from core.agent import Agent
+from core.providers.base import LLMProvider, LLMResponse
+from core.providers.router import ProviderRouter
+from ui.app import BantuApp
+from ui.widgets import Bubble, Orb
+
+_HUDS = []  # kept alive: destroying a HUD mid-run crashed natively (see test_phase7)
+
+
+def pump_until(cond, timeout=5.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        app.processEvents()
+        if cond():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+class Quiet(LLMProvider):
+    name = "quiet"
+
+    def available_models(self):
+        return ["q"]
+
+    def resolve_model(self, preferences):
+        return "q"
+
+    def supports_vision(self):
+        return False
+
+    def chat(self, messages, tools=None, system=None, **kw):
+        return LLMResponse(text="ok", provider=self.name, model="q")
+
+
+class HudSettings:
+    username, assistant_name, voice_enabled = "Harsh", "Bantu", False
+    max_tool_turns, max_output_tokens, temperature = 4, 256, 0.5
+
+
+def texts(hud):
+    return [w.label.text() for w in hud.panel.items() if isinstance(w, Bubble)]
+
+
+notes, store, records, made, done, status = build(
+    [chunk([0.03] * 8, [LOUD] * 8)], lambda wav, prompt="": [Segment(0, 2, "The launch moves to August fourteenth.")],
+    lambda messages, system: summary_json)
+agent = Agent(ProviderRouter([Quiet()]), ToolRegistry(), Memory(Path(tempfile.mkdtemp()) / "hud.db"), HudSettings())
+hud = BantuApp(agent, HudSettings(), install_hotkey=False, show_tray=False, meeting_notes=notes)
+_HUDS.append(hud)
+notes.on_status = hud.meeting_status.emit
+notes.on_done = hud.meeting_done.emit
+check("the record button shows when meeting notes are available", not hud.panel.record.isHidden())
+hud.toggle_recording()
+check("pressing record starts a meeting", pump_until(lambda: notes.recording and hud.orb.recording))
+check("...the panel reminds you to tell the others and that audio is not kept",
+      pump_until(lambda: any("Let everyone know" in t and "never kept" in t for t in texts(hud))), str(texts(hud)))
+check("...and the header counts the recording", pump_until(lambda: hud.panel.recording_label.text().startswith("● REC")
+                                                             and hud.panel.recording_label.isVisibleTo(hud.panel)),
+      hud.panel.recording_label.text())
+check("...and the button now stops", hud.panel.record.toolTip() == "Stop meeting notes")
+notes.pause()
+hud._sync_recording()
+check("a paused meeting says PAUSED", hud.panel.recording_label.text() == "PAUSED")
+notes.resume()
+hud.toggle_recording()
+check("pressing again stops it and the red dot goes", pump_until(lambda: not notes.recording and not hud.orb.recording))
+check("the summary arrives in the panel when it is written",
+      pump_until(lambda: any("Launch moves to 14 August." in t for t in texts(hud)), 8), str(texts(hud)[-2:]))
+check("progress was shown while it was written",
+      "meeting notes:" in hud.panel.status.text() or any("Launch" in t for t in texts(hud)))
+
+notes.start("Started by voice")
+check("a meeting started by a spoken request also shows the red dot and timer",
+      pump_until(lambda: hud.orb.recording and hud.panel.recording_label.text().startswith("● REC"), 3))
+t0 = time.time()
+hud.shutdown()
+check("quitting mid-meeting does not hang, and keeps the meeting as interrupted",
+      time.time() - t0 < 3 and store.latest().status == "interrupted" and not notes.recording, f"{time.time() - t0:.1f}s")
+
+failing, *_ = build([], lambda wav, prompt="": [], lambda m, s_: "{}", fail=True)
+hud2 = BantuApp(Agent(ProviderRouter([Quiet()]), ToolRegistry(), Memory(Path(tempfile.mkdtemp()) / "h2.db"), HudSettings()),
+                HudSettings(), install_hotkey=False, show_tray=False, meeting_notes=failing)
+_HUDS.append(hud2)
+hud2.toggle_recording()
+check("a recording that cannot start says why in the panel",
+      pump_until(lambda: any("could not start" in t and "no microphone" in t for t in texts(hud2))), str(texts(hud2)))
+hud2.shutdown()
+
+hud3 = BantuApp(Agent(ProviderRouter([Quiet()]), ToolRegistry(), Memory(Path(tempfile.mkdtemp()) / "h3.db"), HudSettings()),
+                HudSettings(), install_hotkey=False, show_tray=False)
+_HUDS.append(hud3)
+check("without meeting notes there is no record button", hud3.panel.record.isHidden())
+hud3.shutdown()
+
+orb = Orb()
+orb.set_recording(True)
+check("the orb paints its recording dot without trouble", not orb.grab().isNull() and orb.recording)
+_HUDS.append(orb)
+
+print("\n[Meetings in Settings]")
+from core import config as cfg
+from ui.settings_dialog import SettingsDialog
+from ui.setup_parts import Services
+
+services = Services(check_key=lambda p, k: None, store_key=lambda p, k: None,
+                    existing_key=lambda p: ("gsk_x", "keyring") if p != "calendar" else (None, None),
+                    list_devices=lambda: [], preview_voice=lambda s, g, t: None, open_url=lambda u: None)
+memory, store, records = fresh()
+first = store.create("Vendor call")
+store.add_segments(first.id, [Segment(3, 8, "The contract waits until October.", "call")])
+store.update(first.id, status="done", ended_at=first.started_at + 600, summary="Contract on hold.")
+second = store.create("Hiring sync")
+store.update(second.id, status="done", ended_at=second.started_at + 60)
+settings = cfg.Settings(username="Harsh")
+dlg = SettingsDialog(settings, services, meetings=store)
+_HUDS.append(dlg)
+tabs = [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())]
+check("Settings has a Meetings tab", "Meetings" in tabs, str(tabs))
+check("it lists meetings newest first", dlg.meeting_list.count() == 2 and "Hiring sync" in dlg.meeting_list.item(0).text())
+dlg.meeting_list.setCurrentRow(1)
+viewer = dlg.open_meeting()
+check("opening one shows its summary and transcript",
+      viewer is not None and "Contract on hold." in dlg.meeting_text(store.get(first.id))
+      and "[00:03] Call: The contract waits until October." in dlg.meeting_text(store.get(first.id)))
+asked = []
+dlg.confirm_delete = lambda what: asked.append(what) or False
+dlg.delete_meeting()
+check("deleting asks first, and saying no keeps it", asked == ["'Vendor call'"] and store.get(first.id) is not None)
+dlg.confirm_delete = lambda what: True
+dlg.delete_meeting()
+check("saying yes deletes it and refreshes the list", store.get(first.id) is None and dlg.meeting_list.count() == 1)
+check("transcripts are kept 90 days by default", dlg.retention.currentData() == 90)
+dlg.retention.setCurrentIndex(dlg.retention.findData(0))
+dlg.save()
+check("choosing 'until I delete them' saves 0 days", settings.meeting_retention_days == 0)
+empty_memory, empty_store, _ = fresh()
+empty = SettingsDialog(cfg.Settings(), services, meetings=empty_store)
+_HUDS.append(empty)
+check("with no meetings it says so and Open/Delete are disabled",
+      empty.meeting_list.item(0).text() == "No meetings recorded yet." and not empty.delete_meeting_button.isEnabled())
+live_memory, live_store, _ = fresh()
+live_meeting = live_store.create("In progress")
+live = SettingsDialog(cfg.Settings(), services, meetings=live_store)
+_HUDS.append(live)
+live.confirm_delete = lambda what: True
+live.delete_meeting()
+check("a meeting still recording cannot be deleted from Settings",
+      live_store.get(live_meeting.id) is not None and "Stop the recording" in live.error.text())
+
+main_src = (ROOT / "main.py").read_text(encoding="utf-8")
+check("the app hands meeting notes to the HUD and recovers interrupted meetings at start",
+      "meeting_notes=_MEETING_NOTES" in main_src and "_MEETING_DONE.append(hud.meeting_done.emit)" in main_src
+      and "meetings_store.recover()" in main_src)
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 for f in FAIL:

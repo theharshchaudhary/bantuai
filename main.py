@@ -243,6 +243,9 @@ def build(settings: cfg.Settings | None = None) -> tuple[Agent, cfg.Settings]:
 
     global _MEETING_NOTES
     meetings_store = meeting_tools.Meetings(memory.db)
+    interrupted = meetings_store.recover()
+    if interrupted:
+        logging.getLogger("bantu").info("marked %d meeting(s) interrupted by the last shutdown", interrupted)
     removed = meetings_store.prune(getattr(settings, "meeting_retention_days", meeting_tools.RETENTION_DAYS))
     if removed:
         logging.getLogger("bantu").info("removed %d meeting transcript(s) past retention", removed)
@@ -351,9 +354,11 @@ def run_hud() -> int:
 
     hud = BantuApp(
         agent, settings, listener=_LISTENER, speaker=_SPEAKER, knowledge=_KNOWLEDGE, activity=_ACTIVITY,
-        calendar=_CALENDAR,
+        calendar=_CALENDAR, meeting_notes=_MEETING_NOTES,
     )
     _ANNOUNCERS.append(hud.announced.emit)
+    _MEETING_STATUS.append(hud.meeting_status.emit)
+    _MEETING_DONE.append(hud.meeting_done.emit)
     try:
         return app.exec_()
     finally:

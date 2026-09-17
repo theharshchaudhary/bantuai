@@ -55,6 +55,8 @@ SURFACE = "#141B1F"
 SURFACE_2 = "#1B242A"
 RULE = "#222E35"
 ACCENT = "#47C4D0"
+#: Recording. Not the error red of the orb ring: a meeting being recorded is not a failure.
+RECORD_RED = "#E5484D"
 MONO = "Consolas, 'Cascadia Mono', monospace"
 
 
@@ -73,6 +75,7 @@ class Orb(QWidget):
         self.setToolTip("Bantu — click to open, drag to move")
 
         self._state = State.IDLE
+        self._recording = False
         self._phase = 0.0
         self._press: QPoint | None = None
         self._moved = False
@@ -108,9 +111,19 @@ class Orb(QWidget):
             self._state = state
             self.update()
 
+    @property
+    def recording(self) -> bool:
+        return self._recording
+
+    def set_recording(self, on: bool) -> None:
+        """A red dot on the orb while a meeting is recorded, whatever else Bantu is doing."""
+        if on != self._recording:
+            self._recording = on
+            self.update()
+
     def _animate(self) -> None:
         self._phase = (self._phase + 0.08) % (2 * math.pi)
-        if self._state is not State.IDLE:
+        if self._state is not State.IDLE or self._recording:
             self.update()
 
     # --- painting -----------------------------------------------------------
@@ -150,6 +163,16 @@ class Orb(QWidget):
         p.setPen(QPen(colour, 3))
         p.drawEllipse(inner)
 
+        if self._recording:
+            # Always visible, on top of every state: someone is being recorded.
+            pulse = (math.sin(self._phase * 0.6) + 1) / 2
+            dot = QColor(RECORD_RED)
+            dot.setAlpha(int(170 + 85 * pulse))
+            p.setPen(QPen(QColor(SURFACE), 2))
+            p.setBrush(dot)
+            p.drawEllipse(QPointF(self.width() - 15, 15), 7, 7)
+            p.setBrush(Qt.NoBrush)
+
         if self._state is State.THINKING:
             # A travelling arc says "working" without a spinner widget.
             p.setPen(QPen(QColor(ACCENT), 3, Qt.SolidLine, Qt.RoundCap))
@@ -177,7 +200,7 @@ class Orb(QWidget):
 def glyph(kind: str, color: str = INK_SOFT, size: int = 32) -> QIcon:
     """A plain line icon drawn in code, matching the panel rather than clip art.
 
-    kind: "new" (a plus), "history" (a clock) or "settings" (a gear).
+    kind: "new" (a plus), "history" (a clock), "settings" (a gear), "record" (a dot) or "stop" (a square).
     """
     pix = QPixmap(size, size)
     pix.fill(Qt.transparent)
@@ -195,6 +218,15 @@ def glyph(kind: str, color: str = INK_SOFT, size: int = 32) -> QIcon:
         p.drawEllipse(QRectF(m, m, size - 2 * m, size - 2 * m))
         p.drawLine(QPointF(c, c), QPointF(c, m + size * 0.14))
         p.drawLine(QPointF(c, c), QPointF(c + size * 0.15, c + size * 0.08))
+    elif kind == "record":
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        p.drawEllipse(QPointF(c, c), size * 0.26, size * 0.26)
+    elif kind == "stop":
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        side = size * 0.44
+        p.drawRoundedRect(QRectF(c - side / 2, c - side / 2, side, side), size * 0.08, size * 0.08)
     elif kind == "settings":
         ring, tooth = size * 0.22, size * 0.34
         p.drawEllipse(QPointF(c, c), ring, ring)
@@ -351,6 +383,7 @@ class ChatPanel(QWidget):
     submitted = pyqtSignal(str)
     listen_requested = pyqtSignal()
     settings_requested = pyqtSignal()
+    record_requested = pyqtSignal()
     new_chat_requested = pyqtSignal()
     history_requested = pyqtSignal()
     closed = pyqtSignal()
@@ -378,6 +411,9 @@ class ChatPanel(QWidget):
         head = QHBoxLayout()
         head.addWidget(_label("Bantu", f"color:{INK};font-size:14px;font-weight:600;"))
         head.addStretch(1)
+        self.recording_label = _label("", f"color:{RECORD_RED};font-size:11px;font-weight:600;")
+        self.recording_label.hide()
+        head.addWidget(self.recording_label)
         self.status = _label("ready", f"color:{INK_SOFT};font-size:11px;")
         head.addWidget(self.status)
         self.new_chat = _head_button("New chat", glyph("new"))
@@ -434,6 +470,18 @@ class ChatPanel(QWidget):
         )
         self.entry.returnPressed.connect(self._submit)
         row.addWidget(self.entry, 1)
+
+        self.record = QPushButton()
+        self.record.setFixedSize(36, 36)
+        self.record.setCursor(Qt.PointingHandCursor)
+        self.record.setIconSize(QSize(18, 18))
+        self.record.setStyleSheet(
+            f"QPushButton{{background:{SURFACE_2};border:1px solid {RULE};border-radius:8px;}}"
+            f"QPushButton:hover{{border-color:{RECORD_RED};}}"
+        )
+        self.record.clicked.connect(self.record_requested.emit)
+        row.addWidget(self.record)
+        self.set_recording(False)
 
         self.mic = QPushButton()
         self.mic.setFixedSize(36, 36)
@@ -495,6 +543,13 @@ class ChatPanel(QWidget):
 
     def set_status(self, text: str) -> None:
         self.status.setText(text)
+
+    def set_recording(self, on: bool, label: str = "") -> None:
+        """The record button becomes stop, and the header shows how long it has been recording."""
+        self.record.setIcon(glyph("stop" if on else "record", RECORD_RED if on else INK_SOFT))
+        self.record.setToolTip("Stop meeting notes" if on else "Start meeting notes (records the mic and this PC's audio)")
+        self.recording_label.setText(label)
+        self.recording_label.setVisible(on and bool(label))
 
     def set_busy(self, busy: bool) -> None:
         self.entry.setEnabled(not busy)

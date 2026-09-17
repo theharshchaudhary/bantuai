@@ -60,7 +60,7 @@ plan to Bantu's constraints; he approved all four blocks). In order:
 | R1 | Readiness polish | **done** — faster speech instead of streaming, long chats fit Groq, past chats, new-chat button |
 | R2 | Memory + tasks | **done** — structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
 | R3 | Daily briefing + calendar | **done** (calendar tools still need a live model run: `stress_real.py --only=calendar_add,calendar_list`, quotas were spent); briefing **only when asked** and weather for a city set in Settings (Harsh, 2026-09-17); spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
-| R4 | Meeting notes | **recording, transcription and summaries done and live-tested** (HUD controls and the Meetings tab next). Harsh, 2026-09-17: transcripts kept **90 days** by default; a spoken or typed start begins **at once** (no confirm), with indicator and consent reminder. |
+| R4 | Meeting notes | **done** - recording, transcription, summaries (live-tested), HUD controls and the Meetings tab. Harsh, 2026-09-17: transcripts kept **90 days** by default; a spoken or typed start begins **at once** (no confirm), with indicator and consent reminder. |
 | R5 | Trust layer + wake word | Windows Hello (`UserConsentVerifier`) for chosen sensitive actions; Activity view in Settings; retention settings; wake-word spike on Windows' built-in offline recognizer, falling back to a ~2MB custom openWakeWord model |
 
 Spikes to run before building on them: Groq Whisper long-audio limits, Windows Hello from a desktop
@@ -98,11 +98,12 @@ core/                   PORTABLE — no desktop imports allowed
   weather.py            Open-Meteo forecasts (no key)
   briefing.py           "brief me": date, weather, calendar, reminders, due and overdue
   events.py             calendar: Bantu's own events + Google Calendar read-only (not calendar.py: stdlib name)
+  meetings.py           meeting notes: transcripts, who spoke, summaries, search, tools
   config.py             settings; keys via keyring
   providers/            base.py, gemini.py, groq.py, router.py
   tools/registry.py     @tool decorator -> JSON schema from type hints
 platform_desktop/       Windows tools, registered INTO core
-  files.py system.py web.py shell.py ocr.py gui.py
+  files.py system.py web.py shell.py ocr.py gui.py recorder.py (meeting audio: mic + loopback)
 voice/                  stt.py, tts.py
 ui/                     widgets.py (orb, panel, chips, confirm bar), app.py (worker thread, tray, hotkey),
                         onboarding.py (first-run setup), settings_dialog.py, setup_parts.py (shared)
@@ -121,7 +122,7 @@ Run it:
 
 Only one instance runs at a time (a `QLockFile` in `%APPDATA%\BantuAI`).
 
-**70 tools**, but **only the core group is sent up front** — see "Tools on demand". `/tools` lists
+**77 tools**, but **only the core group is sent up front** — see "Tools on demand". `/tools` lists
 all of them with their tier:
 - **core** (5, portable): `get_datetime`, `remember`, `recall`, `forget`, `search_history`
 - **screen** (3): `read_screen`, `find_on_screen` (Windows OCR), `look_at_screen` (Gemini vision)
@@ -143,6 +144,8 @@ all of them with their tier:
 - **weather** (1, portable, `core/weather.py`): `get_weather`, AUTO. **core** also has `daily_briefing`.
 - **calendar** (3, portable, `core/events.py`): `add_event`, `list_events`, `cancel_event`, all AUTO
   (Bantu's own local events, like reminders).
+- **meetings** (7, portable, `core/meetings.py`): `start_meeting_notes`, `stop_meeting_notes` (AUTO, Harsh's
+  choice), `list_meetings`, `get_meeting`, `search_meetings`, `summarize_meeting` AUTO; `delete_meeting` confirms.
 
 Reminders (`set_reminder`, `list_reminders`, `cancel_reminder`) live in `core/reminders.py`:
 a daemon thread polls SQLite, so they survive a restart. `parse_when` accepts ISO 8601 or
@@ -502,6 +505,18 @@ transcribes as chunks arrive, so a crash loses at most one chunk; silent chunks 
   recording; records saved from a meeting stay. A silent default microphone (here, the unplugged Iriun
   webcam) triggers a warning to pick one in Settings.
 
+**In the app.** A record button beside the mic (a red stop square while recording), a red dot on the orb
+that pulses over every other state, "● REC 12:34" (or PAUSED) in the panel header, and a tray item. Start
+and stop run on background threads, since opening audio devices can take a moment. A once-a-second
+sync follows the recorder itself, so a meeting started by a spoken request shows the dot and timer
+too. Starting from the button posts the consent reminder; the tool's result tells the model to give
+it. The finished summary appears in the panel, with a tray toast and a spoken "Your meeting notes are
+ready". **Quitting mid-meeting** stops the recorder at once and marks the meeting `interrupted`
+(no hang: the summary is not waited for); `Meetings.recover()` marks anything left recording or
+summarising at start-up the same way, and `summarize_meeting` writes the summary later. Settings has a
+**Meetings** tab: the list, Open (summary plus timed transcript), Delete (asks first; refused while
+recording), and "Keep transcripts" (until deleted / 30 / 90 default / 365 days).
+
 Live end to end (5s chunks, a mock meeting played through the speakers): transcript labelled Call, the
 summary had the right date (August 14), "Sita" as owner of the action item, two decisions and one
 action item saved to memory, 27s from start to summary.
@@ -597,8 +612,10 @@ Tests:
 - `tests/test_r4_meetings.py` — 64 checks, no API key, audio/Whisper/model faked: who spoke (call vs you vs
   room), phantom lines over silence, storage and search, 90-day pruning, summaries in one pass or in parts,
   records saved from a meeting, the transcription queue (silence skipped, rate-limit retry), start/pause/stop.
-- `tests/test_r4_meetings.py` now 81 checks: also context prompts and their length cap, the name
-  glossary, cutting chunks at a pause, WAV format, and fragments over silence.
+- `tests/test_r4_meetings.py` now 113 checks: also context prompts and their length cap, the name
+  glossary, cutting chunks at a pause, WAV format, fragments over silence, interrupted meetings and
+  summarising them later, the HUD record button, dot, timer and quitting mid-meeting (offscreen), and the
+  Settings Meetings tab.
 - `tests/test_readiness.py` — no API key: one section per stress-test finding that has been
   fixed, checked against the pre-fix behaviour (the decline tests fail 12 of 33 on the old code).
 - `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15

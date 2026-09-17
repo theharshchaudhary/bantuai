@@ -12,8 +12,8 @@ from typing import Any, Callable
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
-    QTabWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+    QPlainTextEdit, QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from core.activity import OUTCOMES, RETENTION_DAYS, describe_entry
@@ -32,6 +32,13 @@ EVENT_ALERT_CHOICES = (
     (10, "Remind me 10 minutes before"),
     (15, "Remind me 15 minutes before"),
     (30, "Remind me 30 minutes before"),
+)
+
+RETENTION_CHOICES = (
+    (0, "Until I delete them"),
+    (30, "For 30 days"),
+    (90, "For 90 days"),
+    (365, "For a year"),
 )
 
 TONE_CHOICES = (
@@ -55,8 +62,14 @@ class SettingsDialog(QDialog):
         knowledge: Any = None,
         activity: Any = None,
         calendar: Any = None,
+        meetings: Any = None,
     ):
         super().__init__(parent)
+        self.meetings = meetings
+        #: Asks before deleting a meeting. Replaceable, so tests need no real message box.
+        self.confirm_delete: Callable[[str], bool] = lambda what: QMessageBox.question(
+            self, "Delete meeting", f"Delete {what}? Its transcript and summary are removed for good.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
         self.knowledge = knowledge
         self.activity = activity
         self.calendar = calendar
@@ -80,6 +93,8 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(self._general(), "General")
         self.tabs.addTab(self._day(), "Your day")
         self.tabs.addTab(self._keys(), "Keys")
+        if self.meetings is not None:
+            self.tabs.addTab(self._meetings(), "Meetings")
         if self.activity is not None:
             self.tabs.addTab(self._activity(), "Activity")
         self.tabs.addTab(self._about(status), "About")
@@ -235,6 +250,97 @@ class SettingsDialog(QDialog):
         lay.addStretch(1)
         return page
 
+    def _meetings(self) -> QWidget:
+        page, lay = self._tab()
+        lay.addWidget(label("MEETINGS", "section"))
+        lay.addWidget(label("Meetings Bantu has recorded. Audio is never kept, only the transcript and "
+                            "summary; decisions and action items also go into memory.", "lead"))
+        self.meeting_list = QListWidget()
+        self.meeting_list.setObjectName("meetinglist")
+        self.meeting_list.setStyleSheet(
+            "QListWidget#meetinglist{background:#1B242A;color:#E6EDF0;border:1px solid #222E35;"
+            "border-radius:7px;font-size:12px;padding:4px;}"
+            "QListWidget#meetinglist::item{padding:6px 4px;border-bottom:1px solid #222E35;}"
+            "QListWidget#meetinglist::item:selected{background:#1D3B40;color:#E6EDF0;}"
+        )
+        self.meeting_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.meeting_list.itemDoubleClicked.connect(lambda _item: self.open_meeting())
+        lay.addWidget(self.meeting_list, 1)
+        row = QHBoxLayout()
+        self.open_meeting_button = QPushButton("Open")
+        self.open_meeting_button.clicked.connect(self.open_meeting)
+        row.addWidget(self.open_meeting_button)
+        self.delete_meeting_button = QPushButton("Delete")
+        self.delete_meeting_button.clicked.connect(self.delete_meeting)
+        row.addWidget(self.delete_meeting_button)
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addSpacing(6)
+        lay.addWidget(label("KEEP TRANSCRIPTS", "section"))
+        self.retention = QComboBox()
+        for days, text in RETENTION_CHOICES:
+            self.retention.addItem(text, days)
+        self.retention.setCurrentIndex(max(0, self.retention.findData(
+            int(getattr(self.settings, "meeting_retention_days", 90)))))
+        lay.addWidget(self.retention)
+        self.refresh_meetings()
+        return page
+
+    def refresh_meetings(self) -> None:
+        self.meeting_list.clear()
+        meetings = self.meetings.recent(100)
+        for meeting in meetings:
+            item = QListWidgetItem(meeting.describe())
+            item.setData(Qt.UserRole, meeting.id)
+            self.meeting_list.addItem(item)
+        if not meetings:
+            empty = QListWidgetItem("No meetings recorded yet.")
+            empty.setFlags(Qt.NoItemFlags)
+            self.meeting_list.addItem(empty)
+        else:
+            self.meeting_list.setCurrentRow(0)
+        for button in (self.open_meeting_button, self.delete_meeting_button):
+            button.setEnabled(bool(meetings))
+
+    def _selected_meeting(self):
+        item = self.meeting_list.currentItem()
+        meeting_id = item.data(Qt.UserRole) if item is not None else None
+        return self.meetings.get(meeting_id) if meeting_id is not None else None
+
+    def meeting_text(self, meeting) -> str:
+        lines = self.meetings.transcript_lines(meeting.id)
+        summary = meeting.summary or "No summary has been written."
+        return f"{meeting.describe()}\n\n{summary}\n\nTranscript\n\n" + ("\n".join(lines) or "(nothing transcribed)")
+
+    def open_meeting(self) -> QDialog | None:
+        meeting = self._selected_meeting()
+        if meeting is None:
+            return None
+        viewer = QDialog(self)
+        viewer.setWindowTitle(meeting.title)
+        viewer.setStyleSheet(THEME)
+        viewer.resize(640, 560)
+        box = QVBoxLayout(viewer)
+        text = QPlainTextEdit(self.meeting_text(meeting))
+        text.setReadOnly(True)
+        text.setStyleSheet("QPlainTextEdit{background:#1B242A;color:#E6EDF0;border:1px solid #222E35;"
+                           "border-radius:7px;font-size:13px;padding:8px;}")
+        box.addWidget(text)
+        viewer.show()
+        self._viewer = viewer  # kept, or it is collected while open
+        return viewer
+
+    def delete_meeting(self) -> None:
+        meeting = self._selected_meeting()
+        if meeting is None:
+            return
+        if meeting.status in ("recording", "paused"):
+            self._fail("Stop the recording before deleting it.", self.tabs.indexOf(self.meeting_list.parentWidget()))
+            return
+        if self.confirm_delete(f"'{meeting.title}'"):
+            self.meetings.delete(meeting.id)
+            self.refresh_meetings()
+
     def _activity(self) -> QWidget:
         page, lay = self._tab()
         lay.addWidget(label("ACTIVITY", "section"))
@@ -361,6 +467,8 @@ class SettingsDialog(QDialog):
         update("tone", self.tone.currentData())
         update("weather_city", " ".join(self.city.text().split()))
         update("event_alert_minutes", self.event_alert.currentData())
+        if self.meetings is not None:
+            update("meeting_retention_days", self.retention.currentData())
         update("voice_gender", self.voice.gender)
         update("voice_enabled", self.speak_replies.isChecked())
         update("mic_device", self.mic.device)
