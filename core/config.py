@@ -117,6 +117,8 @@ class Settings:
     # --- setup --------------------------------------------------------------
     #: False until first-run setup completes. Keys found in .env do not count:
     #: setup moves them into the credential store.
+    #: Folder of documents Bantu can search. Empty means Documents\Bantu Knowledge.
+    knowledge_dir: str = ""
     onboarded: bool = False
 
     # ------------------------------------------------------------------------

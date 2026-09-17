@@ -58,7 +58,7 @@ plan to Bantu's constraints; he approved all four blocks). In order:
 | Step | What | Notes |
 |---|---|---|
 | R1 | Readiness polish | **done** — faster speech instead of streaming, long chats fit Groq, past chats, new-chat button |
-| R2 | Memory + tasks | **records, notes tools, follow-ups done** (knowledge folder and activity log next): structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
+| R2 | Memory + tasks | **records, notes tools, follow-ups, knowledge folder done** (activity log next): structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
 | R3 | Daily briefing + calendar | spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
 | R4 | Meeting notes | explicit start/stop with a visible indicator; chunked Groq Whisper transcript; summary, decisions, action items into memory; **transcript-only by default** (audio deleted), retention and delete controls; summaries state what was said with times, never judgments about people |
 | R5 | Trust layer + wake word | Windows Hello (`UserConsentVerifier`) for chosen sensitive actions; Activity view in Settings; retention settings; wake-word spike on Windows' built-in offline recognizer, falling back to a ~2MB custom openWakeWord model |
@@ -93,6 +93,7 @@ core/                   PORTABLE — no desktop imports allowed
   agent.py              the tool-calling loop (max 12 turns)
   memory.py             SQLite + FTS5 conversation and fact storage
   records.py            commitments, decisions, action items, tasks, notes, people
+  knowledge.py          the knowledge folder: index, poll, search tools
   config.py             settings; keys via keyring
   providers/            base.py, gemini.py, groq.py, router.py
   tools/registry.py     @tool decorator -> JSON schema from type hints
@@ -116,7 +117,7 @@ Run it:
 
 Only one instance runs at a time (a `QLockFile` in `%APPDATA%\BantuAI`).
 
-**63 tools**, but **only the core group is sent up front** — see "Tools on demand". `/tools` lists
+**65 tools**, but **only the core group is sent up front** — see "Tools on demand". `/tools` lists
 all of them with their tier:
 - **core** (5, portable): `get_datetime`, `remember`, `recall`, `forget`, `search_history`
 - **screen** (3): `read_screen`, `find_on_screen` (Windows OCR), `look_at_screen` (Gemini vision)
@@ -134,6 +135,7 @@ all of them with their tier:
   `wait_for_text`, `locate_on_screen` are AUTO. Drives **any** app, including ones with no API.
 - **notes** (4, portable, `core/tools/notes.py`): `note`, `find_notes`, `update_note` are AUTO;
   `delete_note` confirms. See "Structured memory".
+- **knowledge** (2, portable, `core/knowledge.py`): `search_knowledge`, `list_knowledge`, both AUTO.
 
 Reminders (`set_reminder`, `list_reminders`, `cancel_reminder`) live in `core/reminders.py`:
 a daemon thread polls SQLite, so they survive a restart. `parse_when` accepts ISO 8601 or
@@ -377,6 +379,32 @@ for an office-move decision never made, a Hindi promise to सीता stored a
 done", and open commitments listing only the open one: **13 of 14**, the miss a grader not matching
 "don’t" with a curly apostrophe (fixed).
 
+## Knowledge folder (R2, 2026-09-17)
+
+Drop `.txt`, `.md`, `.csv`, `.pdf`, `.docx` or `.xlsx` files into **Documents\Bantu Knowledge** (the real
+Documents known folder, which OneDrive often moves; `settings.knowledge_dir` overrides it) and Bantu
+answers from them, naming the file. **Not under `%APPDATA%\BantuAI`**: the path guard blocks every
+tool from Bantu's own folder, so Bantu could not even copy a document in. Tray menu and Settings
+(About tab) open the folder and show what is indexed.
+
+`core/knowledge.py` chunks text (~1,000 chars at paragraphs, then sentences) into FTS5 with the
+Devanagari-aware tokenizer. The folder is **polled** every 30s, not watched: `watchdog` was listed in
+`Requirements.txt` but never installed, and an incremental poll (compare mtime and size, re-read what
+changed) needs only the stdlib. `search_knowledge` also syncs first, so a file dropped a moment ago
+counts. PDF/Word/Excel go through `platform_desktop.files.extract_document_text`, the same code as
+`read_document`. An unreadable, empty or oversized (25MB) file is recorded with its reason and not
+re-read until it changes; Word's `~$` lock files and hidden files are skipped. Text files decode as
+UTF-8, UTF-16 only with a byte-order mark (without the check, Windows-1252 bytes "decoded" as UTF-16
+nonsense), else Windows-1252.
+
+**Search tries all words first.** If no passage has every word it falls back to any word, labelled
+"No passage mentions all of ... may not answer the question": "parking policy" otherwise returned the
+leave policy on "policy" alone. **The catalog line must claim "their documents"**: with a vaguer line,
+"according to my documents" sent the model through `search_files` eight times first (238s); after, 3
+turns and ~7s. Tests and `stress_real.py` point `knowledge_dir` at temp folders so nothing lands in the
+real Documents. Live, twice: the leave policy answer (18 days, 5 carry over, file named), "documents do
+not cover parking", and a Hindi question answered in Hindi from a Hindi document - 6 of 6.
+
 ## The stack — all verified working on this machine
 
 | Layer | Choice | Notes |
@@ -438,6 +466,9 @@ Tests:
 - `tests/test_r2_memory.py` — 93 checks, no API key: records, filters and ordering, follow-ups once,
   notes tools and tiers, past-due warnings, honest-recall prompt, leaked-markup cleaning, and Hindi and
   Nepali search including rebuilding an old database's indexes.
+- `tests/test_r2_knowledge.py` — 48 checks, no API key, temp folders only: chunking, text encodings,
+  sync (add/edit/delete/ignore/unreadable/oversized), Word and Excel through the real readers, polling,
+  all-words-first search, tools, default folder location, and the Settings section.
 - `tests/test_readiness.py` — no API key: one section per stress-test finding that has been
   fixed, checked against the pre-fix behaviour (the decline tests fail 12 of 33 on the old code).
 - `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15

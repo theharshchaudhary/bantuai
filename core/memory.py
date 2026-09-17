@@ -119,7 +119,7 @@ def estimate_text_tokens(text: str) -> int:
     return int(len(text or "") / CHARS_PER_TOKEN)
 
 
-def _fts_query(text: str) -> str:
+def _fts_query(text: str, all_words: bool = False) -> str:
     """Turn free text into a safe FTS5 MATCH expression.
 
     User text goes straight into MATCH otherwise, where a stray quote or a bare
@@ -131,7 +131,7 @@ def _fts_query(text: str) -> str:
     """
     kept = "".join(c if unicodedata.category(c)[0] in "LNM" else " " for c in text)
     words = [w for w in kept.split() if len(w) > 1]
-    return " OR ".join(f'"{w}"' for w in words[:12])
+    return (" AND " if all_words else " OR ").join(f'"{w}"' for w in words[:12])
 
 
 @dataclass

@@ -65,6 +65,53 @@ def _stat_line(p: Path) -> str:
         return str(p)
 
 
+def extract_document_text(p: Path, max_pages: int = 40) -> str:
+    """Text from a PDF, DOCX or XLSX. Also used to index the knowledge folder."""
+    suffix = p.suffix.lower()
+    try:
+        if suffix == ".pdf":
+            from pypdf import PdfReader
+
+            reader = PdfReader(str(p))
+            pages = reader.pages[:max_pages]
+            out = [f"[page {i + 1}]\n{pg.extract_text() or ''}" for i, pg in enumerate(pages)]
+            extra = ""
+            if len(reader.pages) > max_pages:
+                extra = f"\n... [{len(reader.pages) - max_pages} more pages]"
+            return ("\n\n".join(out) or "(no extractable text — it may be scanned images)") + extra
+        if suffix == ".docx":
+            import docx
+
+            d = docx.Document(str(p))
+            body = "\n".join(par.text for par in d.paragraphs if par.text.strip())
+            tables = [
+                " | ".join(c.text.strip() for c in row.cells)
+                for t in d.tables
+                for row in t.rows
+            ]
+            return (body + ("\n\n" + "\n".join(tables) if tables else "")) or "(empty document)"
+        if suffix in (".xlsx", ".xlsm"):
+            import openpyxl
+
+            wb = openpyxl.load_workbook(str(p), data_only=True, read_only=True)
+            out = []
+            for ws in wb.worksheets:
+                out.append(f"[sheet: {ws.title}]")
+                for row in ws.iter_rows(values_only=True):
+                    if any(c is not None for c in row):
+                        out.append(" | ".join("" if c is None else str(c) for c in row))
+                    if len(out) > 400:
+                        out.append("... [truncated]")
+                        break
+            wb.close()
+            return "\n".join(out) or "(empty workbook)"
+    except ImportError as e:
+        raise ToolError(f"missing reader for {suffix}: {e}") from e
+    except Exception as e:
+        raise ToolError(f"could not parse {p.name}: {type(e).__name__}: {e}") from e
+    raise ToolError(f"{suffix or 'this file'} is not a supported document; try read_file")
+
+
 def register(reg: ToolRegistry) -> None:
     reg.describe_category("files", "find, read, write, move, copy, organise, zip and delete files; read PDF, Word and Excel documents; disk usage")
 
@@ -168,49 +215,7 @@ def register(reg: ToolRegistry) -> None:
         p = guard_read(path)
         if not p.is_file():
             raise ToolError(f"{p} is not a file")
-        suffix = p.suffix.lower()
-        try:
-            if suffix == ".pdf":
-                from pypdf import PdfReader
-
-                reader = PdfReader(str(p))
-                pages = reader.pages[:max_pages]
-                out = [f"[page {i + 1}]\n{pg.extract_text() or ''}" for i, pg in enumerate(pages)]
-                extra = ""
-                if len(reader.pages) > max_pages:
-                    extra = f"\n... [{len(reader.pages) - max_pages} more pages]"
-                return ("\n\n".join(out) or "(no extractable text — it may be scanned images)") + extra
-            if suffix == ".docx":
-                import docx
-
-                d = docx.Document(str(p))
-                body = "\n".join(par.text for par in d.paragraphs if par.text.strip())
-                tables = [
-                    " | ".join(c.text.strip() for c in row.cells)
-                    for t in d.tables
-                    for row in t.rows
-                ]
-                return (body + ("\n\n" + "\n".join(tables) if tables else "")) or "(empty document)"
-            if suffix in (".xlsx", ".xlsm"):
-                import openpyxl
-
-                wb = openpyxl.load_workbook(str(p), data_only=True, read_only=True)
-                out = []
-                for ws in wb.worksheets:
-                    out.append(f"[sheet: {ws.title}]")
-                    for row in ws.iter_rows(values_only=True):
-                        if any(c is not None for c in row):
-                            out.append(" | ".join("" if c is None else str(c) for c in row))
-                        if len(out) > 400:
-                            out.append("... [truncated]")
-                            break
-                wb.close()
-                return "\n".join(out) or "(empty workbook)"
-        except ImportError as e:
-            raise ToolError(f"missing reader for {suffix}: {e}") from e
-        except Exception as e:
-            raise ToolError(f"could not parse {p.name}: {type(e).__name__}: {e}") from e
-        raise ToolError(f"{suffix or 'this file'} is not a supported document; try read_file")
+        return extract_document_text(p, max_pages)
 
     @reg.register(tier=Tier.AUTO, category="files")
     def list_directory(path: str = "", pattern: str = "", recursive: bool = False) -> str:

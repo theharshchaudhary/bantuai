@@ -49,6 +49,35 @@ SYSTEM_ROOTS = _system_roots()
 MAX_READ_BYTES = 200_000
 
 
+def documents_dir() -> Path:
+    """The user's Documents folder, wherever Windows really keeps it.
+
+    Often not ~/Documents: OneDrive moves it (to ...\\OneDrive\\Documents), so
+    ask the shell for the known folder rather than guessing.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            import uuid
+            from ctypes import wintypes
+
+            class GUID(ctypes.Structure):
+                _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                            ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+            guid = GUID()
+            ctypes.memmove(ctypes.byref(guid), uuid.UUID("{FDD39AD0-238F-46AF-ADB4-6C85480369C7}").bytes_le, 16)
+            out = ctypes.c_wchar_p()
+            if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(out)) == 0:
+                try:
+                    return Path(out.value)
+                finally:
+                    ctypes.windll.ole32.CoTaskMemFree(out)
+        except Exception:
+            pass
+    return Path.home() / "Documents"
+
+
 def _bantu_dir() -> Path:
     from core.config import user_data_dir
 

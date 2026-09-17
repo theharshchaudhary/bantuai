@@ -42,6 +42,8 @@ from core.memory import Memory
 from core.reminders import ReminderScheduler
 from core.providers.base import ProviderError
 from core.providers.router import build_router
+from core.knowledge import Knowledge
+from core.knowledge import register as register_knowledge
 from core.records import Records
 from core.tools import builtin, notes
 from core.tools.registry import Tier, Tool, ToolRegistry
@@ -95,6 +97,22 @@ _SPEAKER = None
 _LISTENER = None
 #: Extra reminder announcers. The HUD registers one; the CLI needs none.
 _ANNOUNCERS: list = []
+_KNOWLEDGE: Knowledge | None = None
+
+
+def knowledge_folder(settings: cfg.Settings) -> Path:
+    """Where the user drops documents to teach Bantu: visible, not hidden in AppData.
+
+    Not under %APPDATA%\\BantuAI: the path guard blocks every tool from Bantu's own
+    folder, so Bantu could not even copy a document in for the user.
+    """
+    if getattr(settings, "knowledge_dir", ""):
+        return Path(settings.knowledge_dir).expanduser()
+    if sys.platform == "win32":
+        from platform_desktop.paths import documents_dir
+
+        return documents_dir() / "Bantu Knowledge"
+    return Path.home() / "Bantu Knowledge"
 
 
 def build(settings: cfg.Settings | None = None) -> tuple[Agent, cfg.Settings]:
@@ -105,6 +123,22 @@ def build(settings: cfg.Settings | None = None) -> tuple[Agent, cfg.Settings]:
     builtin.register(_REGISTRY, memory)
     records = Records(memory.db)
     notes.register(_REGISTRY, records, memory)
+
+    global _KNOWLEDGE
+    readers = {}
+    try:
+        from platform_desktop.files import extract_document_text
+
+        readers = {
+            ".pdf": lambda p: extract_document_text(p, max_pages=500),
+            ".docx": extract_document_text,
+            ".xlsx": extract_document_text,
+        }
+    except Exception as e:
+        logging.getLogger("bantu").warning("document readers unavailable: %s", e)
+    _KNOWLEDGE = Knowledge(memory.db, knowledge_folder(settings), readers)
+    register_knowledge(_REGISTRY, _KNOWLEDGE)
+    _KNOWLEDGE.start_polling()  # the first sync runs in the background, not at startup
     # Core tools go with every request; everything else loads on demand. Sending
     # all of them fit only ~2 agent turns a minute into Groq's free token cap.
     _REGISTRY.enable_lazy_loading(base={"core"})
@@ -231,7 +265,7 @@ def run_hud() -> int:
 
     from ui.app import BantuApp
 
-    hud = BantuApp(agent, settings, listener=_LISTENER, speaker=_SPEAKER)
+    hud = BantuApp(agent, settings, listener=_LISTENER, speaker=_SPEAKER, knowledge=_KNOWLEDGE)
     _ANNOUNCERS.append(hud.announced.emit)
     try:
         return app.exec_()

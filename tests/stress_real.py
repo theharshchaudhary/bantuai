@@ -69,6 +69,15 @@ def build_sandbox() -> None:
     messy.mkdir()
     for n in ("holiday.jpg", "scan.png", "budget.pdf", "song.mp3", "setup.exe"):
         (messy / n).write_bytes(b"x" * 64)
+    kb = SANDBOX / "knowledge"
+    kb.mkdir()
+    (kb / "leave_policy.md").write_text(
+        "# Leave policy\n\nEmployees receive 18 days of paid leave per year.\n\n"
+        "Up to 5 unused days carry over into the next year; the rest lapse on 31 March.\n",
+        encoding="utf-8")
+    (kb / "संपर्क.txt").write_text(
+        "वेंडर संपर्क: ग्लोबेक्स कंपनी में राम शर्मा हमारे मुख्य संपर्क हैं। फ़ोन पर सोमवार से शुक्रवार उपलब्ध।\n",
+        encoding="utf-8")
 
 
 build_sandbox()
@@ -80,7 +89,10 @@ from core.records import Records  # noqa: E402
 from core.tools.registry import Tool  # noqa: E402
 from voice.tts import detect_language  # noqa: E402
 
-agent, settings = main.build()
+_settings = cfg.Settings.load()
+# Never the user's real Documents\Bantu Knowledge: tasks write test documents here.
+_settings.knowledge_dir = str(SANDBOX / "knowledge")
+agent, settings = main.build(_settings)
 settings.username = "Harsh"
 settings.voice_enabled = False
 KEYS = [k for k in (cfg.get_key("groq"), cfg.get_key("gemini")) if k]
@@ -335,6 +347,21 @@ TASKS = [
      lambda r: (any(x.status == "done" for x in RECORDS.find(person="Ram")),
                 "the Ram commitment is marked done")),
 
+    # --- R2: the knowledge folder (sandbox copy, seeded in build_sandbox). ---
+    ("knowledge_answer",
+     "According to my documents, how many days of paid leave do employees get, and how many unused days carry over?",
+     lambda r: (called(r, "search_knowledge") and near(r.reply, 18, 0) and near(r.reply, 5, 0),
+                "reads the leave policy: 18 days, 5 carry over")),
+
+    ("knowledge_none", "What do my documents say about the parking policy?",
+     lambda r: (called(r, "search_knowledge") and says(r, "no ", "not ", "nothing", "don't", "doesn't", "do not",
+                                                       "does not", "couldn't", "could not"),
+                "searches, finds nothing, and says the documents do not cover it")),
+
+    ("knowledge_hindi", "मेरे दस्तावेज़ों के अनुसार ग्लोबेक्स में हमारा वेंडर संपर्क कौन है?",
+     lambda r: (called(r, "search_knowledge") and devanagari(r.reply) and says(r, "राम"),
+                "a Hindi answer from the Hindi document: Ram Sharma")),
+
     ("open_commitments", "What are my outstanding commitments?",
      lambda r: (says(r, "बजट", "budget", "सीता", "sita") and not says(r, "vendor report"),
                 "lists the open Sita promise, not the finished Ram one")),
@@ -409,6 +436,8 @@ def main_run() -> None:
         web.shutdown()
     except Exception:
         pass
+    if main._KNOWLEDGE is not None:
+        main._KNOWLEDGE.stop_polling()  # it shares the database connection closed next
     agent.memory.close()
     shutil.rmtree(SANDBOX, ignore_errors=True)
     shutil.rmtree(TEMP_APPDATA, ignore_errors=True)

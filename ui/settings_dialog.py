@@ -34,8 +34,10 @@ class SettingsDialog(QDialog):
         data_dir: str = "",
         status: Callable[[], str] | None = None,
         parent: QWidget | None = None,
+        knowledge: Any = None,
     ):
         super().__init__(parent)
+        self.knowledge = knowledge
         self.settings = settings
         self.services = services
         self.data_dir = data_dir
@@ -148,8 +150,31 @@ class SettingsDialog(QDialog):
         row.addWidget(open_folder)
         row.addStretch(1)
         lay.addLayout(row)
+
+        if self.knowledge is not None:
+            lay.addSpacing(6)
+            lay.addWidget(label("KNOWLEDGE FOLDER", "section"))
+            kinds = ", ".join(self.knowledge.suffixes)
+            lay.addWidget(label(
+                f"Drop documents here and {getattr(self.settings, 'assistant_name', 'Bantu')} can answer "
+                f"from them ({kinds}).", "lead"))
+            where = label(str(self.knowledge.folder), "hint")
+            where.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            lay.addWidget(where)
+            self.knowledge_summary = label(self.knowledge.summary(), "hint")
+            lay.addWidget(self.knowledge_summary)
+            open_knowledge = QPushButton("Open knowledge folder")
+            open_knowledge.clicked.connect(self._open_knowledge)
+            row = QHBoxLayout()
+            row.addWidget(open_knowledge)
+            row.addStretch(1)
+            lay.addLayout(row)
         lay.addStretch(1)
         return page
+
+    def _open_knowledge(self) -> None:
+        self.knowledge.folder.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(self.knowledge.folder))  # noqa: S606
 
     # --- saving -----------------------------------------------------------
 

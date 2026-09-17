@@ -154,9 +154,11 @@ class BantuApp(QObject):
         install_hotkey: bool = True,
         show_tray: bool = True,
         services: Any = None,
+        knowledge: Any = None,
     ):
         super().__init__()
         self.services = services
+        self.knowledge = knowledge
         self._hotkey_enabled = install_hotkey
         self._settings_dialog = None
         self.agent = agent
@@ -498,6 +500,11 @@ class BantuApp(QObject):
         self._voice_action.triggered.connect(self._toggle_voice)
         menu.addAction(self._voice_action)
 
+        if self.knowledge is not None:
+            knowledge_action = QAction("Knowledge folder…", menu)
+            knowledge_action.triggered.connect(self.open_knowledge_folder)
+            menu.addAction(knowledge_action)
+
         settings_action = QAction("Settings…", menu)
         settings_action.triggered.connect(self.open_settings)
         menu.addAction(settings_action)
@@ -541,10 +548,19 @@ class BantuApp(QObject):
             self.services or real_services(),
             str(cfg.user_data_dir()),
             self.connection_status,
+            knowledge=self.knowledge,
         )
         dialog.applied.connect(self.apply_settings)
         self._settings_dialog = dialog
         dialog.show()
+
+    def open_knowledge_folder(self) -> None:
+        import os
+
+        if self.knowledge is None:
+            return
+        self.knowledge.folder.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(self.knowledge.folder))  # noqa: S606
 
     def connection_status(self) -> str:
         lines = []
