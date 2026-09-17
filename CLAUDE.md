@@ -60,7 +60,7 @@ plan to Bantu's constraints; he approved all four blocks). In order:
 | R1 | Readiness polish | **done** — faster speech instead of streaming, long chats fit Groq, past chats, new-chat button |
 | R2 | Memory + tasks | **done** — structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
 | R3 | Daily briefing + calendar | **done** (calendar tools still need a live model run: `stress_real.py --only=calendar_add,calendar_list`, quotas were spent); briefing **only when asked** and weather for a city set in Settings (Harsh, 2026-09-17); spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
-| R4 | Meeting notes | explicit start/stop with a visible indicator; chunked Groq Whisper transcript; summary, decisions, action items into memory; **transcript-only by default** (audio deleted), retention and delete controls; summaries state what was said with times, never judgments about people |
+| R4 | Meeting notes | **core done** (`core/meetings.py`: storage, speaker labels, phantom-line filter, transcription queue, summary, tools; not wired yet). Harsh, 2026-09-17: transcripts kept **90 days** by default; a spoken or typed start begins **at once** (no confirm), with indicator and consent reminder. |
 | R5 | Trust layer + wake word | Windows Hello (`UserConsentVerifier`) for chosen sensitive actions; Activity view in Settings; retention settings; wake-word spike on Windows' built-in offline recognizer, falling back to a ~2MB custom openWakeWord model |
 
 Spikes to run before building on them: Groq Whisper long-audio limits, Windows Hello from a desktop
@@ -561,6 +561,9 @@ Tests:
   language hint, weather (parsing, caching, unknown and Devanagari cities, outages), the briefing and
   its failing sections, the calendar store, Google feed parsing and sync, event alerts, calendar tools,
   and the Settings fields.
+- `tests/test_r4_meetings.py` — 64 checks, no API key, audio/Whisper/model faked: who spoke (call vs you vs
+  room), phantom lines over silence, storage and search, 90-day pruning, summaries in one pass or in parts,
+  records saved from a meeting, the transcription queue (silence skipped, rate-limit retry), start/pause/stop.
 - `tests/test_readiness.py` — no API key: one section per stress-test finding that has been
   fixed, checked against the pre-fix behaviour (the decline tests fail 12 of 33 on the old code).
 - `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15
