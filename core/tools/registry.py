@@ -340,11 +340,15 @@ class ToolRegistry:
                     f"Error: {tool.name} needs confirmation but nothing can ask the user "
                     f"right now, so it was not run."
                 )
+            declined = (
+                f"The user said no to {tool.name}, so it was not done. "
+                f"Do not try to do it another way."
+            )
             try:
                 if not confirm(tool, call.arguments):
-                    return f"The user declined to run {tool.name}. Do not retry it; try another way."
+                    return declined
             except Rejected:
-                return f"The user declined to run {tool.name}. Do not retry it; try another way."
+                return declined
 
         try:
             bound = self._coerce(tool, call.arguments)

@@ -164,7 +164,8 @@ claims.
 
 ## Stress test — 2026-09-17 baseline
 
-`tests/stress_real.py`, first run: **22/26 passed in 14.4 min.** Findings, worst first. None fixed yet.
+`tests/stress_real.py`, first run: **22/26 passed in 14.4 min.** Findings, worst first; fixes are
+marked as they land, each pinned by `tests/test_readiness.py`.
 
 1. **A decline made Bantu try another way to do the same thing.** The registry's own decline
    message said *"Do not retry it; try another way."* Declined `delete_file` -> it tried PowerShell
@@ -172,6 +173,16 @@ claims.
    12-step cap after 276s. Declined `power_action` -> it tried `shutdown /s /t 0`, then asked "Do you
    want me to shut down the computer now?" Every attempt was stopped by the confirm tier, so nothing
    happened, but this is a trust failure. A "no" must end the attempt, enforced in code.
+   **Fixed.** A decline now ends the request in `Agent.run`: later calls in the same step are
+   skipped (each still gets a result, or the next request is malformed), and the closing reply is
+   requested with **no tools offered**, so there is nothing to try another way with. A call made
+   anyway is ignored, and a provider failure falls back to "Okay, I didn't run X." Verified live
+   that both Groq and Gemini accept a no-tools request after a real tool call, Gemini's signed
+   call included. Live: declined delete (English and Hindi) and shutdown each asked once and
+   stopped. Two wording traps found on the way: "in Harsh's language" made the model answer an
+   English request in Hindi (it guessed from the name), so the prompt says "the same language as
+   their latest message"; and Gemini told a Nepali user a "security policy" blocked it, so the
+   closing prompt forbids blaming a policy.
 2. **Sustained use stalls 10-30s per turn: Groq's 8K tokens/minute.** Turn latency tracked request
    size almost exactly: the bucket refills ~133 tok/s, so a 3,400-token request waits ~25s (measured
    24.9s, 24.9s, 21.9s) and a 2,000-token one ~15s (14.3s, 14.9s). First five tasks: median 0.7s per
@@ -189,6 +200,18 @@ claims.
    was still loaded) and cost an extra ~20s turn; it then replied in English. "Look at my screen and
    describe it" used OCR text, not vision: defensible given the vision budget, but the description
    was a guess from words.
+6. **Once `gpt-oss-120b` runs out, no tool task can finish** (found re-testing fix 1). Two bugs:
+   - The Groq adapter never tries its other models. Groq's published free limits are **per model**:
+     30 req/min, 1,000 req/day, 8K tok/min and **200K tok/day** each for `gpt-oss-120b`,
+     `gpt-oss-20b` and `qwen/qwen3.8-27b`. The daily *token* cap binds first: two stress runs
+     (~150K input tokens each) exhausted `gpt-oss-120b`, and the router then benched all of Groq
+     (a 497s cooldown) while the other two models had their full day unused. The per-minute 429
+     reads "on tokens per minute (TPM) ... Please try again in 14.85s" with `retry-after: 15`.
+   - **Memory drops `ToolCall.meta`**, so Gemini's `thought_signature` is lost the moment history is
+     re-read, which the agent does every turn. Gemini then rejects its *own* previous call:
+     `400 Function call is missing a thought_signature`. Any multi-step tool task on Gemini fails,
+     and so does any failover after Groq made a call. `smoke_live.py` never caught it because it
+     calls providers directly, not through `Memory`.
 
 Solid: capital, time, remember/recall across conversations, reminder set/list/cancel, create/edit a
 file, read a .docx, dry-run organize, a 4-step read-and-summarize, example.com heading, battery and
@@ -200,7 +223,7 @@ Cricket World Cup 2023 answered correctly (Australia), from knowledge, no search
 
 | Layer | Choice | Notes |
 |---|---|---|
-| Reasoning | Groq `openai/gpt-oss-120b` | **primary** — ~1,000 req/day, ~0.5s |
+| Reasoning | Groq `openai/gpt-oss-120b` | **primary** — ~0.5s; 200K tok/day and 8K tok/min per model bind before 1,000 req/day |
 | Overflow | Gemini `gemini-3.6-flash` | only 20 req/day/model, so second not first |
 | Vision | Gemini Flash image input | **the only free provider that can see**; ~120 calls/day total |
 | Screen text | **`winsdk` → `Windows.Media.Ocr`** | verified 13ms, zero install, **returns per-word boxes** |
@@ -254,6 +277,8 @@ Tests:
   tokens, and takes ~15 min while the rate-limit stalls below exist. `--only=name1,name2` runs a
   subset. Declined GUI steps can still open apps (AUTO tier), so run it when windows popping up
   is acceptable.
+- `tests/test_readiness.py` — no API key: one section per stress-test finding that has been
+  fixed, checked against the pre-fix behaviour (the decline tests fail 12 of 33 on the old code).
 - `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15
   free requests (mind the 20/day/model Gemini cap when re-running).
   Covers what fakes cannot: real wire formats, the tool-call round trip, vision, and the

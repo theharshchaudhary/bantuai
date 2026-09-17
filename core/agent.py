@@ -23,7 +23,7 @@ from .providers.base import (
     ToolNotLoaded,
 )
 from .providers.router import ProviderRouter
-from .tools.registry import ConfirmFn, Tier, Tool, ToolRegistry
+from .tools.registry import ConfirmFn, Rejected, Tier, Tool, ToolRegistry
 
 log = logging.getLogger("bantu.agent")
 
@@ -40,9 +40,20 @@ Be concise. No preamble, no restating the question, no offers of further help
 unless they are genuinely useful. When a tool fails, say plainly what failed and
 what you tried instead.
 
-Never claim to have done something you did not do. If a tool was declined or
-errored, say so.
+Never claim to have done something you did not do. If a tool errored, say so.
+If {user} says no to a step, that request is over: never look for another way
+to do it.
 {facts}"""
+
+# Appended to the system prompt for the one reply written after a "no".
+AFTER_DECLINE = """
+
+{user} just said no to a step, so this request is over and no tools are
+available. In one or two short sentences, written in the same language as their
+latest message, say what you did not do because they said no. Do not blame a
+policy or an error, and do not offer another way to do it."""
+
+SKIPPED_AFTER_DECLINE = "Not run: the user said no to an earlier step of this request."
 
 
 # --- events -----------------------------------------------------------------
@@ -83,6 +94,8 @@ class Agent:
     settings: Any
     on_event: EventFn | None = None
     confirm: ConfirmFn | None = None
+    #: Tools the user said no to during the current request.
+    _declined: list[str] = field(default_factory=list, init=False, repr=False)
 
     def _emit(self, kind: str, **kw: Any) -> None:
         if self.on_event:
@@ -118,6 +131,7 @@ class Agent:
         """Handle one user request start to finish."""
         images = list(images or [])
         self.registry.new_task()  # per-task approvals never leak between requests
+        self._declined = []
         self.memory.append(Message.user(user_text, images))
 
         system = self._system()
@@ -179,8 +193,16 @@ class Agent:
                 return AgentResult(text, turn + 1, total_calls, resp.provider, resp.model)
 
             for call in resp.tool_calls:
+                if self._declined:
+                    # Every call needs a result in history, or the next request is
+                    # malformed; a step after a "no" gets one without running.
+                    self.memory.append(Message.tool_result(call, SKIPPED_AFTER_DECLINE))
+                    continue
                 total_calls += 1
                 self._run_one(call)
+
+            if self._declined:
+                return self._finish_after_decline(system, temp, budget, turn + 1, total_calls)
 
         # Ran out of turns. Say so rather than pretending the task finished.
         note = (
@@ -210,13 +232,46 @@ class Agent:
 
         def ask(t: Tool, args: dict[str, Any]) -> bool:
             if self.confirm is None:
+                self._declined.append(t.name)
                 return False  # no way to ask means no permission, never assume yes
-            allowed = self.confirm(t, args)
+            try:
+                allowed = self.confirm(t, args)
+            except Rejected:
+                allowed = False
             if not allowed:
+                self._declined.append(t.name)
                 self._emit("declined", tool=t.name, arguments=args)
             return allowed
 
         return ask
+
+    def _finish_after_decline(self, system: str, temp: float, budget: int, turns: int, calls: int) -> AgentResult:
+        """End the request after the user said no.
+
+        The stress test caught the model answering a declined delete with
+        PowerShell, then with clicks in File Explorer. So the closing reply is
+        written with no tools offered: there is nothing left to try another way
+        with, whatever the model decides.
+        """
+        declined = ", ".join(dict.fromkeys(self._declined))
+        text, provider, model = "", "", ""
+        try:
+            resp = self.router.chat(
+                self.memory.history(),
+                tools=None,
+                system=system + AFTER_DECLINE.format(user=self._user),
+                temperature=temp,
+                max_output_tokens=budget,
+            )
+            # A call made anyway is ignored: it could not be answered, and
+            # storing it without a result would break the next request.
+            text, provider, model = (resp.text or "").strip(), resp.provider, resp.model
+        except ProviderError as e:
+            log.warning("closing reply after a decline failed: %s", e)
+        text = text or f"Okay, I didn't run {declined}."
+        self.memory.append(Message.assistant(text))
+        self._emit("text", text=text)
+        return AgentResult(text, turns + 1, calls, provider, model)
 
     @staticmethod
     def _explain(e: AllProvidersFailed) -> str:

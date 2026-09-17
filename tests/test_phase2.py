@@ -151,7 +151,7 @@ check("confirm-tier refuses when nothing can ask",
 check("...and did not run", ran == [])
 
 check("declining is reported back to the model",
-      "declined" in reg.execute(ToolCall("9", "mutate", {"path": "x"}), confirm=lambda t, a: False))
+      "said no" in reg.execute(ToolCall("9", "mutate", {"path": "x"}), confirm=lambda t, a: False))
 check("...and still did not run", ran == [])
 
 check("approving runs it",
@@ -321,7 +321,7 @@ a, calls, events = make_agent(
 res = a.run("delete everything")
 check("a declined tool does not run", calls == [])
 check("the model is told it was declined",
-      any("declined" in (m.content or "") for m in a.memory.history() if m.role == "tool"))
+      any("said no" in (m.content or "") for m in a.memory.history() if m.role == "tool"))
 check("a declined event is emitted", any(e.kind == "declined" for e in events))
 
 a, calls, events = make_agent(
