@@ -44,7 +44,7 @@ Owner: Harsh. Repo: `theharshchaudhary/bantuai`, branch `main`.
 | 07 | HUD — floating orb, chat panel, tray, global hotkey | **done** |
 | 08 | GUI control — click, type, keys, scroll via OCR; vision fallback for icons | **done** |
 | 09 | Onboarding — first-run setup, Settings window, live key checks | **done** |
-| 10 | Packaging — PyInstaller `.exe` | **next** |
+| 10 | Packaging — PyInstaller `.exe` | **deferred** — Harsh, 2026-09-17: not ready enough to package. Do not start without asking. |
 | 11 | README rewrite | — |
 
 Post-v1: proactive trigger engine (v1.1), semantic memory + habits (v1.2), Home Assistant + phone (v2).
