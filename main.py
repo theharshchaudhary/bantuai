@@ -25,6 +25,17 @@ for _stream in (sys.stdout, sys.stderr):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Before anything touches the screen. At 125% display scaling a process that has
+# not opted in gets screenshots in physical pixels but window rectangles and the
+# cursor in scaled ones, so every click would land 25% off target.
+if sys.platform == "win32":
+    try:
+        from platform_desktop.gui import ensure_dpi_awareness
+
+        ensure_dpi_awareness()
+    except Exception:
+        pass
+
 from core import config as cfg
 from core.agent import Agent, Event
 from core.memory import Memory
@@ -128,6 +139,12 @@ def build() -> tuple[Agent, cfg.Settings]:
             vision.register(_REGISTRY, router, settings)
         except Exception as e:
             logging.getLogger("bantu").warning("screen vision unavailable: %s", e)
+        try:
+            from platform_desktop import gui
+
+            gui.register(_REGISTRY, router, settings)
+        except Exception as e:
+            logging.getLogger("bantu").warning("GUI control unavailable: %s", e)
 
     # Reminders fire on a daemon thread; how they are announced is platform
     # specific, so the portable scheduler takes a callback.

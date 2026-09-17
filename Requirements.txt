@@ -44,7 +44,8 @@ PyQt5
 keyboard                # global push-to-talk hotkey, no admin rights needed
 
 # --- Phase 08: GUI control --------------------------------------------------
-pyautogui               # clicks and typing, driven by OCR word boxes
+pyautogui               # mouse control; also its corner fail-safe aborts any action
+# typing uses `keyboard` (Phase 07) with Unicode events, so Hindi and Nepali type correctly
 
 # --- Phase 09: packaging ----------------------------------------------------
 pyinstaller

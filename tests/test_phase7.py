@@ -139,8 +139,12 @@ from ui.app import BantuApp as _B, Worker as _W
 # Only names Bantu declares itself: QObject's own signals (destroyed, ...) are inherited.
 _mine = [n for cls in (_W, _B) for n in vars(cls) if hasattr(QObject, n) and not n.startswith('__')]
 check("no Bantu signal or method shadows a QObject member", not _mine, str(_mine))
-check("BantuApp does not shadow QObject.thread", "self.thread" not in
-      Path(__file__).resolve().parents[1].joinpath("ui", "app.py").read_text(encoding="utf-8"))
+# Assignment is what shadowed it and crashed; calling the real self.thread() is fine.
+import re as _re
+
+check("BantuApp does not shadow QObject.thread by assigning to it",
+      not _re.search(r"self\.thread\s*=(?!=)",
+                     Path(__file__).resolve().parents[1].joinpath("ui", "app.py").read_text(encoding="utf-8")))
 
 
 # --- construction -----------------------------------------------------------
@@ -303,6 +307,41 @@ check("a reminder appears in the transcript",
       pump_until(lambda: any(isinstance(w, Bubble) and "stretch your legs" in w.label.text()
                              for w in hud.panel.items())))
 hud.shutdown()
+
+# --- stepping aside for GUI control -----------------------------------------
+
+print("\n[stepping aside for GUI control]")
+import threading as _threading
+
+from platform_desktop import gui as _gui
+
+hud, _ = make([LLMResponse(text="done on screen")])
+hud.toggle_panel()
+check("the HUD registers a step-aside hook", hud._step_aside in _gui._before_action)
+
+seen = {}
+
+
+def _tool_thread():
+    _gui._step_aside()  # what a GUI tool does before capturing the screen
+    seen["hidden_when_hook_returned"] = not hud.panel.isVisible()
+
+
+t = _threading.Thread(target=_tool_thread)
+t.start()
+check("the hook returns once the UI thread has acted",
+      pump_until(lambda: not t.is_alive(), 3), "worker thread still blocked")
+check("...and the panel was already hidden by then — no capture can race the hide",
+      seen.get("hidden_when_hook_returned") is True, seen)
+
+hud._step_aside()  # the same call on the UI thread must not deadlock
+check("calling it on the UI thread does not deadlock", True)
+
+hud.ask("click something")
+check("the panel comes back with the result once the run finishes",
+      pump_until(lambda: not hud.busy and hud.panel.isVisible(), 5), hud.panel.isVisible())
+hud.shutdown()
+check("shutting down unregisters the hook", hud._step_aside not in _gui._before_action)
 
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 for f in FAIL:

@@ -13,7 +13,7 @@ import logging
 import threading
 from typing import Any
 
-from PyQt5.QtCore import QObject, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QAction, QApplication, QMenu, QSystemTrayIcon
 
@@ -112,6 +112,7 @@ class BantuApp(QObject):
     _run_text = pyqtSignal(str)
     _run_voice = pyqtSignal()
     _hotkey_pressed = pyqtSignal()
+    _step_aside_signal = pyqtSignal()
     announced = pyqtSignal(str, str)
 
     def __init__(
@@ -158,6 +159,19 @@ class BantuApp(QObject):
         self.panel.closed.connect(self.panel.hide)
         self._hotkey_pressed.connect(self.listen)
         self.announced.connect(self._on_announced)
+
+        # GUI tools run on the worker thread and must never screenshot or click
+        # Bantu's own panel. A blocking queued connection makes the worker wait
+        # until the UI thread has really hidden it, so no capture races the hide.
+        self._stepped_aside = False
+        self._step_aside_signal.connect(self._hide_for_gui, Qt.BlockingQueuedConnection)
+        try:
+            from platform_desktop import gui as _gui
+
+            _gui.add_before_action(self._step_aside)
+            self._gui = _gui
+        except Exception:
+            self._gui = None
 
         self._chips: list[Any] = []
         self._tray = self._build_tray() if show_tray else None
@@ -272,8 +286,25 @@ class BantuApp(QObject):
         # Reject is the safe choice, so it is the one a stray Enter should hit.
         QTimer.singleShot(0, bar.buttons["no"].setFocus)
 
+    def _step_aside(self) -> None:
+        """Called by GUI tools on whatever thread they run on."""
+        if QThread.currentThread() == self.thread():
+            # Already on the UI thread: a blocking connection to ourselves would deadlock.
+            self._hide_for_gui()
+        else:
+            self._step_aside_signal.emit()
+
+    def _hide_for_gui(self) -> None:
+        if self.panel.isVisible():
+            self.panel.hide()
+            self._stepped_aside = True
+
     def _on_finished(self, text: str) -> None:
         self.busy = False
+        if self._stepped_aside:
+            # Come back once the work on screen is done, to show the result.
+            self._stepped_aside = False
+            self._show_panel()
         self._chips = [c for c in self._chips if c.result is None]
         self.panel.set_busy(False)
         if text:
@@ -373,6 +404,8 @@ class BantuApp(QObject):
                 keyboard.remove_hotkey(self.hotkey)
             except Exception:
                 pass
+        if self._gui is not None:
+            self._gui.remove_before_action(self._step_aside)
         self.worker.close()      # a pending confirmation would otherwise hang the thread
         if self.speaker:
             self.speaker.shutdown()

@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from core.tools.registry import Tier, ToolError, ToolRegistry
 
@@ -44,16 +44,23 @@ class Match:
     y: int
     w: int
     h: int
+    #: OCR line the words came from, so neighbours on the same line can be found.
+    line: int = -1
 
     @property
     def center(self) -> tuple[int, int]:
         return self.x + self.w // 2, self.y + self.h // 2
 
 
-def _grab(region: str = "") -> Any:
-    from PIL import ImageGrab
+def _virtual_origin() -> tuple[int, int]:
+    """Top-left of the desktop. Negative when a monitor sits left of or above the primary."""
+    import ctypes
+    import sys
 
-    return ImageGrab.grab(bbox=parse_region(region), all_screens=True)
+    if sys.platform != "win32":
+        return 0, 0
+    u = ctypes.windll.user32
+    return u.GetSystemMetrics(76), u.GetSystemMetrics(77)
 
 
 async def _recognize(png_path: str) -> tuple[str, list[Word]]:
@@ -81,17 +88,50 @@ async def _recognize(png_path: str) -> tuple[str, list[Word]]:
     return result.text or "", words
 
 
-def ocr_screen(region: str = "") -> tuple[str, list[Word]]:
-    """Capture and OCR. Shared by the tools below and, later, by GUI control."""
-    img = _grab(region)
-    tmp = Path(tempfile.gettempdir()) / "bantu_ocr.png"
+#: Windows OCR rejects images larger than this on either side.
+_OCR_MAX_SIDE = 9000
+
+
+def capture_words(
+    bbox: tuple[int, int, int, int] | None = None, scale: int = 1
+) -> tuple[str, list[Word]]:
+    """Capture a screen area and OCR it, returning words in ABSOLUTE screen coordinates.
+
+    OCR boxes are relative to the captured image. They are shifted by where that
+    image sits on the desktop, so a word's centre is a point you can click. PIL
+    treats a bbox as absolute when all_screens is set, and without one the image
+    starts at the virtual-screen origin — which is negative on some layouts.
+    """
+    from PIL import ImageGrab
+
+    img = ImageGrab.grab(bbox=bbox, all_screens=True)
+    ox, oy = (bbox[0], bbox[1]) if bbox else _virtual_origin()
+    # Small UI text is where Windows OCR struggles: at 1x it read "Duplicate" as
+    # "Dupicate". Upscaling helps, but coordinates must be scaled back down.
+    scale = max(1, min(int(scale), _OCR_MAX_SIDE // max(img.width, img.height, 1)))
+    if scale > 1:
+        from PIL import Image as _PILImage
+
+        img = img.resize((img.width * scale, img.height * scale), _PILImage.LANCZOS)
+    tmp = Path(tempfile.gettempdir()) / f"bantu_ocr_{threading.get_ident()}_{scale}.png"
     img.save(tmp, format="PNG")
     try:
-        return asyncio.run(_recognize(str(tmp)))
+        text, words = asyncio.run(_recognize(str(tmp)))
     except ToolError:
         raise
     except Exception as e:
         raise ToolError(f"OCR failed: {type(e).__name__}: {e}") from e
+    for w in words:
+        w.x = ox + round(w.x / scale)
+        w.y = oy + round(w.y / scale)
+        w.w = max(1, round(w.w / scale))
+        w.h = max(1, round(w.h / scale))
+    return text, words
+
+
+def ocr_screen(region: str = "") -> tuple[str, list[Word]]:
+    """Read the whole screen, or a 'left,top,right,bottom' region of it."""
+    return capture_words(parse_region(region))
 
 
 def find_matches(words: list[Word], needle: str, max_span: int = 8) -> list[Match]:
@@ -125,7 +165,7 @@ def find_matches(words: list[Word], needle: str, max_span: int = 8) -> list[Matc
                 key = (x, y, w, h)
                 if key not in seen:
                     seen.add(key)
-                    out.append(Match(" ".join(p.text for p in parts), x, y, w, h))
+                    out.append(Match(" ".join(p.text for p in parts), x, y, w, h, words[start].line))
                 break
             # Stop growing once the window can no longer become a prefix match.
             if len(joined) > len(target) + 40:

@@ -42,8 +42,8 @@ Owner: Harsh. Repo: `theharshchaudhary/bantuai`, branch `main`.
 | 05 | Web tools (8) — DuckDuckGo, page fetch, Selenium | **done** |
 | 06 | Voice — Groq Whisper in, edge-tts out, barge-in | **done** |
 | 07 | HUD — floating orb, chat panel, tray, global hotkey | **done** |
-| 08 | GUI control — click-by-name via OCR boxes, vision fallback | **next** |
-| 09 | Onboarding — first-run wizard, settings | — |
+| 08 | GUI control — click, type, keys, scroll via OCR; vision fallback for icons | **done** |
+| 09 | Onboarding — first-run wizard, settings | **next** |
 | 10 | Packaging — PyInstaller `.exe` | — |
 | 11 | README rewrite | — |
 
@@ -76,7 +76,7 @@ Run it:
 
 Only one instance runs at a time (a `QLockFile` in `%APPDATA%\BantuAI`).
 
-**52 tools so far** — `/tools` lists them with their tier:
+**59 tools so far** — `/tools` lists them with their tier:
 - **core** (5, portable): `get_datetime`, `remember`, `recall`, `forget`, `search_history`
 - **screen** (3): `read_screen`, `find_on_screen` (Windows OCR), `look_at_screen` (Gemini vision)
 - **files** (15): `search_files`, `read_file`, `read_document`, `list_directory`, `file_info`,
@@ -89,6 +89,8 @@ Only one instance runs at a time (a `QLockFile` in `%APPDATA%\BantuAI`).
 - **shell** (1): `run_powershell` — always CONFIRM, with a deny-list backstop.
 - **web** (8): `web_search`, `search_news`, `fetch_page`, `browser_open`, `browser_read` are AUTO;
   `download_file`, `browser_click`, `browser_type` confirm — a click can submit or purchase.
+- **gui** (7): `click_text`, `click_at`, `type_text`, `press_keys` confirm; `scroll`,
+  `wait_for_text`, `locate_on_screen` are AUTO. Drives **any** app, including ones with no API.
 
 Reminders (`set_reminder`, `list_reminders`, `cancel_reminder`) live in `core/reminders.py`:
 a daemon thread polls SQLite, so they survive a restart. `parse_when` accepts ISO 8601 or
@@ -133,6 +135,12 @@ Tests:
 - `tests/test_phase7.py` — 47 checks, runs Qt **offscreen** against a scripted agent: real worker
   thread, the cross-thread confirmation handshake (reject / approve / approve-all), error state,
   and quitting while a prompt is open. No window appears.
+- `tests/test_phase8.py` — 56 checks, no screen touched: vision box parsing, coordinate mapping
+  (including negative multi-monitor origins), match ranking and ambiguity refusal, fuzzy OCR
+  matches, and that a blocked command typed into a terminal is refused.
+- `tests/test_phase8_live.py` — 23 checks that **really move the mouse and type** (~30s, hands off).
+  Drives `tests/gui_target.py`, a separate app that records what happened to it. The only test
+  that proves an OCR position becomes a click on the right pixel at real display scaling.
 - `tests/test_fixes.py` — 34 checks guarding bugs that actually shipped: images surviving the
   agent loop, database migration, reminders, multi-word screen matching, region parsing.
   Add a `test_phaseN.py` per phase and keep them key-free.
@@ -226,6 +234,41 @@ Found by bisection in Phase 7. A native crash kills the process with no Python t
 Stylesheets must target object names (`QFrame#shell`), never a bare `QFrame{}`: `QLabel` and
 `QScrollArea` both subclass `QFrame`, so a class selector restyles every label inside.
 
+### GUI control — measured on this machine, 2026-09-17
+
+1. **Display is at 125% scaling, and an unaware process mixes two pixel spaces.** Screenshots come
+   back physical (1920x1080) while window rectangles and the cursor come back scaled (1536x864).
+   OCR would find "Save" at physical (1000, 600) and the click would land at physical (1250, 750).
+   `main.py` calls `gui.ensure_dpi_awareness()` before anything touches the screen. pyautogui
+   happens to fix this on import, which is exactly why it must not be relied on: correctness
+   would depend on import order.
+2. **Windows OCR misreads small UI text, and each scale misreads different words.** At 1x it read
+   "Duplicate" as "Dupicate" and "Show later" as "Show Ster"; 2x fixed one and broke another; 3x
+   fixed both but misread a list row. So `click_text` reads at **1x and 3x and merges**, then
+   ranks exact > partial > fuzzy (0.8 similarity). Merging also matters for safety: if one pass
+   misses the second "Delete" button, the other still sees it and the ambiguity refusal fires.
+3. **An exact match must stand alone.** "Save" inside a "Save As" title was an exact match; if
+   OCR missed the real Save button, that title would have been clicked. A neighbour closer than
+   word spacing now demotes a match to partial.
+4. **Ambiguity is refused, never guessed.** Two "Duplicate" buttons produce an error listing both
+   positions; the model must call again with `occurrence`.
+5. **Bantu never operates itself.** Its own windows are excluded from OCR matches, a click that
+   would land on one is refused, and in the HUD the panel hides before any capture via a
+   `BlockingQueuedConnection`, so the worker waits until it is really gone.
+6. **Typing into a terminal goes through the `run_powershell` deny-list**, otherwise
+   `type_text` + Enter would be a way around it. Known gap: VS Code's integrated terminal runs
+   inside `Code.exe` and cannot be told apart from the editor, so it is not covered.
+7. **pyautogui's scroll units are 1/120 of a notch.** `scroll(5)` barely moves; multiply by 120.
+8. **Vision boxes are `[ymin, xmin, ymax, xmax]` normalised to 0-1000** — y first. Verified live:
+   Gemini located a red circle inside its radius.
+9. **No synthetic Alt tap to take focus.** The common trick opens the menu bar in Notepad and VS
+   Code, so typed text triggers menu items. `activate()` attaches input queues instead, then
+   falls back to minimise-and-restore.
+
+Verified end to end: Bantu's real agent, given "click the Launch probe button, then type Bantu was
+here", chose `click_text` -> `click_text` -> `type_text` itself and the target app recorded
+exactly that. Moving the mouse into a screen corner aborts any action (pyautogui fail-safe).
+
 ## Language and voice
 
 Bantu must speak **English, Hindi and Nepali**. TTS is `edge-tts` — free, no API key, no download.
@@ -304,6 +347,15 @@ refuses zip-slip paths.
 - Runtime state goes to `%APPDATA%\BantuAI\`, never beside the executable.
 
 ## Open decisions
+
+- **Throughput on Groq's free tier — needs a decision.** Measured 2026-09-17: every request sends
+  all 59 tool schemas, ~3,750 input tokens. Groq allows 8,000 tokens/minute, so **only about two
+  agent turns fit in a minute**. The Groq SDK then *silently* retries (`max_retries=2` by default):
+  turns 2 and 3 of a simple task each stalled ~28s while reporting success, so the router never saw
+  a 429 and never failed over. A three-step GUI task took 99s. The argument schemas cost ~3,090
+  tokens and the descriptions only ~1,450, so trimming descriptions is the wrong lever. Options:
+  send tools by category on demand; surface 429s and fail over to Gemini (burns the ~120/day vision
+  budget); or wait visibly. Not yet changed — this is Harsh's call.
 
 - ~~Voice selection~~ — **closed.** All six voices chosen; see "Language and voice".
 - **Android APK** — wanted eventually, but ~35 of 41 tools are meaningless on a phone and a remote
