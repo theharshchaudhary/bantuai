@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QCheckBox, QDialog, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
+    QCheckBox, QComboBox, QDialog, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
     QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -21,6 +21,13 @@ from core.providers.validate import KEY_PAGES
 
 from .setup_parts import (
     BAD, THEME, KeyField, MicPicker, Services, VoicePicker, label, validate_hotkey,
+)
+
+
+TONE_CHOICES = (
+    ("warm", "Warm professional - friendly, respectful, never gushing"),
+    ("playful", "Playful - witty and light, still exact when working"),
+    ("professional", "Strictly professional - crisp, no small talk"),
 )
 
 
@@ -101,6 +108,15 @@ class SettingsDialog(QDialog):
         self.name = QLineEdit(getattr(self.settings, "username", "") or "")
         self.name.setPlaceholderText("What Bantu calls you")
         lay.addWidget(self.name)
+
+        lay.addSpacing(6)
+        lay.addWidget(label("PERSONALITY", "section"))
+        self.tone = QComboBox()
+        for value, text in TONE_CHOICES:
+            self.tone.addItem(text, value)
+        current = self.tone.findData(getattr(self.settings, "tone", "warm"))
+        self.tone.setCurrentIndex(max(0, current))
+        lay.addWidget(self.tone)
 
         lay.addSpacing(6)
         lay.addWidget(label("VOICE", "section"))
@@ -258,6 +274,7 @@ class SettingsDialog(QDialog):
                 changes.add(tag or attr)
 
         update("username", self.name.text().strip())
+        update("tone", self.tone.currentData())
         update("voice_gender", self.voice.gender)
         update("voice_enabled", self.speak_replies.isChecked())
         update("mic_device", self.mic.device)

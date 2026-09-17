@@ -50,6 +50,15 @@ def relative_time(ts: float, now: float | None = None) -> str:
     return f"{then.day} {then:%b}"
 
 
+def greeting(name: str, now: datetime.datetime | None = None) -> str:
+    """'Good morning, Harsh.' - by the hour, with the name when there is one."""
+    hour = (now or datetime.datetime.now()).hour
+    part = ("Good morning" if 5 <= hour < 12 else "Good afternoon" if 12 <= hour < 17
+            else "Good evening" if 17 <= hour < 22 else "Hello")
+    name = (name or "").strip()
+    return f"{part}, {name}." if name else f"{part}."
+
+
 def chat_title(text: str, limit: int = 42) -> str:
     one_line = " ".join((text or "").split())
     return one_line if len(one_line) <= limit else one_line[: limit - 1].rstrip() + "…"
@@ -229,7 +238,7 @@ class BantuApp(QObject):
 
         self.orb.show()
         if not self._resume_recent_chat():
-            self._greet(f"{settings.assistant_name} is ready.")
+            self._greet(f"{greeting(getattr(settings, 'username', ''))} {settings.assistant_name} is ready.")
 
     # --- chats --------------------------------------------------------------
 

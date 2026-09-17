@@ -113,12 +113,16 @@ class Settings:
     #: which every other user would have been called.
     username: str = ""
     assistant_name: str = "Bantu"
+    #: How Bantu talks: "warm" (warm professional, the default), "playful" or "professional".
+    tone: str = "warm"
+
+    # --- places -------------------------------------------------------------
+    #: Folder of documents Bantu can search. Empty means Documents\Bantu Knowledge.
+    knowledge_dir: str = ""
 
     # --- setup --------------------------------------------------------------
     #: False until first-run setup completes. Keys found in .env do not count:
     #: setup moves them into the credential store.
-    #: Folder of documents Bantu can search. Empty means Documents\Bantu Knowledge.
-    knowledge_dir: str = ""
     onboarded: bool = False
 
     # ------------------------------------------------------------------------

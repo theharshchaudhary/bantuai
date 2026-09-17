@@ -59,7 +59,7 @@ plan to Bantu's constraints; he approved all four blocks). In order:
 |---|---|---|
 | R1 | Readiness polish | **done** — faster speech instead of streaming, long chats fit Groq, past chats, new-chat button |
 | R2 | Memory + tasks | **done** — structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
-| R3 | Daily briefing + calendar | spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
+| R3 | Daily briefing + calendar | **personality done**; briefing **only when asked** and weather for a city set in Settings (Harsh, 2026-09-17); spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
 | R4 | Meeting notes | explicit start/stop with a visible indicator; chunked Groq Whisper transcript; summary, decisions, action items into memory; **transcript-only by default** (audio deleted), retention and delete controls; summaries state what was said with times, never judgments about people |
 | R5 | Trust layer + wake word | Windows Hello (`UserConsentVerifier`) for chosen sensitive actions; Activity view in Settings; retention settings; wake-word spike on Windows' built-in offline recognizer, falling back to a ~2MB custom openWakeWord model |
 
@@ -406,6 +406,16 @@ turns and ~7s. Tests and `stress_real.py` point `knowledge_dir` at temp folders 
 real Documents. Live, twice: the leave policy answer (18 days, 5 carry over, file named), "documents do
 not cover parking", and a Hindi question answered in Hindi from a Hindi document - 6 of 6.
 
+## Personality (R3, 2026-09-17)
+
+`settings.tone`: **warm** (default, Harsh's choice), **playful** or **professional**, chosen in Settings
+(General) and applied at once, since the agent reads it on every request. Each is one sentence in
+`agent.TONES` dropped into the system prompt; an unknown value falls back to warm. The HUD opens with a
+time-of-day greeting by name ("Good afternoon, Harsh. Bantu is ready."; "Hello" from 22:00 to 05:00).
+Live on gpt-oss-120b to "I finally finished that report I was dreading": warm - "Great job getting that
+report done"; playful - "Congrats on slaying the dreaded report"; professional - "Report completed. Let
+me know if you need to schedule a review".
+
 ## The stack — all verified working on this machine
 
 | Layer | Choice | Notes |
@@ -473,6 +483,8 @@ Tests:
 - `tests/test_r2_activity.py` — 25 checks, no API key: every outcome the registry logs and what it does
   not, argument truncation, pruning, a broken log not blocking actions, a decline through the agent, and
   the Settings Activity tab.
+- `tests/test_r3_briefing.py` — no API key: tones in the prompt, fallback, persistence, greeting by
+  hour, the HUD greeting, and Settings applying a tone. (Grows with the briefing and calendar.)
 - `tests/test_readiness.py` — no API key: one section per stress-test finding that has been
   fixed, checked against the pre-fix behaviour (the decline tests fail 12 of 33 on the old code).
 - `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15

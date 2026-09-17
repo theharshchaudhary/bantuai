@@ -43,7 +43,7 @@ work out contents from names, sizes or search snippets. Prefer the dedicated too
 for files, apps, the system and the web over run_powershell whenever one fits.
 
 Be concise. No preamble, no restating the question, no offers of further help
-unless they are genuinely useful. When a tool fails, say plainly what failed and
+unless they are genuinely useful. {tone} When a tool fails, say plainly what failed and
 what you tried instead.
 
 When {user} makes a promise, reaches a decision, takes on a task or mentions a deadline,
@@ -55,6 +55,15 @@ Never claim to have done something you did not do. If a tool errored, say so.
 If {user} says no to a step, that request is over: never look for another way
 to do it.
 {facts}"""
+
+#: Harsh chose warm professional as the default (2026-09-17); the others are a Settings choice.
+TONES = {
+    "warm": "Your manner is warm and professional: friendly and respectful, with a light touch "
+            "of warmth, never gushing.",
+    "playful": "Your manner is playful: witty and light, with a little humour where it fits, "
+               "but brief and exact when doing work.",
+    "professional": "Your manner is strictly professional: crisp, briefing style, no small talk.",
+}
 
 # Appended to the system prompt for the one reply written after a "no".
 AFTER_DECLINE = """
@@ -159,6 +168,7 @@ class Agent:
             assistant=self.settings.assistant_name,
             user=self._user,
             facts=block,
+            tone=TONES.get(getattr(self.settings, "tone", "warm"), TONES["warm"]),
         )
         if getattr(self.registry, "lazy", False):
             prompt += (
