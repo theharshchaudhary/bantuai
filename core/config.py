@@ -119,6 +119,8 @@ class Settings:
     # --- places -------------------------------------------------------------
     #: Folder of documents Bantu can search. Empty means Documents\Bantu Knowledge.
     knowledge_dir: str = ""
+    #: City for weather in the briefing, in Latin letters. Empty means no weather.
+    weather_city: str = ""
 
     # --- setup --------------------------------------------------------------
     #: False until first-run setup completes. Keys found in .env do not count:

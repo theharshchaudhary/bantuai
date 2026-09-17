@@ -76,6 +76,8 @@ class Services:
     list_devices: Callable[[], list[tuple[int, str]]]
     preview_voice: Callable[[Any, str, str], None]
     open_url: Callable[[str], None] = webbrowser.open
+    #: City name -> a readable place ("Kathmandu, Bagmati Province, Nepal"); raises if not found.
+    find_place: Callable[[str], str] | None = None
 
 
 def real_services() -> Services:
@@ -99,7 +101,12 @@ def real_services() -> Services:
         trial = dataclasses.replace(settings, voice_gender=gender, voice_enabled=True)
         Speaker(trial).speak(text, lang="en", blocking=True)
 
-    return Services(check_key, cfg.set_key, existing, devices, preview)
+    def find_place(city: str) -> str:
+        from core.weather import Weather
+
+        return Weather().find_place(city).label
+
+    return Services(check_key, cfg.set_key, existing, devices, preview, find_place=find_place)
 
 
 class _Relay(QObject):

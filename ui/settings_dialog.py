@@ -20,7 +20,7 @@ from core.activity import OUTCOMES, RETENTION_DAYS, describe_entry
 from core.providers.validate import KEY_PAGES
 
 from .setup_parts import (
-    BAD, THEME, KeyField, MicPicker, Services, VoicePicker, label, validate_hotkey,
+    BAD, OK, THEME, KeyField, MicPicker, Services, VoicePicker, label, run_in_background, validate_hotkey,
 )
 
 
@@ -119,6 +119,21 @@ class SettingsDialog(QDialog):
         lay.addWidget(self.tone)
 
         lay.addSpacing(6)
+        lay.addWidget(label("WEATHER CITY", "section"))
+        row = QHBoxLayout()
+        self.city = QLineEdit(getattr(self.settings, "weather_city", "") or "")
+        self.city.setPlaceholderText("e.g. Kathmandu - in Latin letters; empty for no weather")
+        row.addWidget(self.city, 1)
+        self.check_city = QPushButton("Check")
+        self.check_city.setEnabled(self.services.find_place is not None)
+        self.check_city.clicked.connect(self._check_city)
+        row.addWidget(self.check_city)
+        lay.addLayout(row)
+        self.city_result = label("", "hint")
+        lay.addWidget(self.city_result)
+        self.city.textChanged.connect(lambda _t: self.city_result.setText(""))
+
+        lay.addSpacing(6)
         lay.addWidget(label("VOICE", "section"))
         self.voice = VoicePicker(self.settings, self.services, lambda: self.name.text())
         lay.addWidget(self.voice)
@@ -139,6 +154,27 @@ class SettingsDialog(QDialog):
         lay.addWidget(label("Works from any app. It needs Ctrl, Alt or Windows.", "hint"))
         lay.addStretch(1)
         return page
+
+    def _check_city(self) -> None:
+        city = self.city.text().strip()
+        if not city:
+            self.city_result.setText("Leave it empty for no weather, or type a city.")
+            return
+        self.check_city.setEnabled(False)
+        self.city_result.setStyleSheet("")
+        self.city_result.setText("Looking it up…")
+
+        def done(result) -> None:
+            self.check_city.setEnabled(True)
+            if isinstance(result, Exception):
+                self.city_result.setStyleSheet(f"color:{BAD};")
+                message = str(result)
+                self.city_result.setText(message[:1].upper() + message[1:])
+            else:
+                self.city_result.setStyleSheet(f"color:{OK};")
+                self.city_result.setText(f"Found: {result}")
+
+        run_in_background(lambda: self.services.find_place(city), done)
 
     def _keys(self) -> QWidget:
         page, lay = self._tab()
@@ -275,6 +311,7 @@ class SettingsDialog(QDialog):
 
         update("username", self.name.text().strip())
         update("tone", self.tone.currentData())
+        update("weather_city", " ".join(self.city.text().split()))
         update("voice_gender", self.voice.gender)
         update("voice_enabled", self.speak_replies.isChecked())
         update("mic_device", self.mic.device)

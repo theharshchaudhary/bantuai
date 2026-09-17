@@ -59,7 +59,7 @@ plan to Bantu's constraints; he approved all four blocks). In order:
 |---|---|---|
 | R1 | Readiness polish | **done** — faster speech instead of streaming, long chats fit Groq, past chats, new-chat button |
 | R2 | Memory + tasks | **done** — structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
-| R3 | Daily briefing + calendar | **personality done**; briefing **only when asked** and weather for a city set in Settings (Harsh, 2026-09-17); spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
+| R3 | Daily briefing + calendar | **personality, weather and briefing done** (calendar next); briefing **only when asked** and weather for a city set in Settings (Harsh, 2026-09-17); spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
 | R4 | Meeting notes | explicit start/stop with a visible indicator; chunked Groq Whisper transcript; summary, decisions, action items into memory; **transcript-only by default** (audio deleted), retention and delete controls; summaries state what was said with times, never judgments about people |
 | R5 | Trust layer + wake word | Windows Hello (`UserConsentVerifier`) for chosen sensitive actions; Activity view in Settings; retention settings; wake-word spike on Windows' built-in offline recognizer, falling back to a ~2MB custom openWakeWord model |
 
@@ -95,6 +95,8 @@ core/                   PORTABLE — no desktop imports allowed
   records.py            commitments, decisions, action items, tasks, notes, people
   knowledge.py          the knowledge folder: index, poll, search tools
   activity.py           local log of approvals, refusals, blocks and failures
+  weather.py            Open-Meteo forecasts (no key)
+  briefing.py           "brief me": date, weather, calendar, reminders, due and overdue
   config.py             settings; keys via keyring
   providers/            base.py, gemini.py, groq.py, router.py
   tools/registry.py     @tool decorator -> JSON schema from type hints
@@ -118,7 +120,7 @@ Run it:
 
 Only one instance runs at a time (a `QLockFile` in `%APPDATA%\BantuAI`).
 
-**65 tools**, but **only the core group is sent up front** — see "Tools on demand". `/tools` lists
+**67 tools**, but **only the core group is sent up front** — see "Tools on demand". `/tools` lists
 all of them with their tier:
 - **core** (5, portable): `get_datetime`, `remember`, `recall`, `forget`, `search_history`
 - **screen** (3): `read_screen`, `find_on_screen` (Windows OCR), `look_at_screen` (Gemini vision)
@@ -137,6 +139,7 @@ all of them with their tier:
 - **notes** (4, portable, `core/tools/notes.py`): `note`, `find_notes`, `update_note` are AUTO;
   `delete_note` confirms. See "Structured memory".
 - **knowledge** (2, portable, `core/knowledge.py`): `search_knowledge`, `list_knowledge`, both AUTO.
+- **weather** (1, portable, `core/weather.py`): `get_weather`, AUTO. **core** also has `daily_briefing`.
 
 Reminders (`set_reminder`, `list_reminders`, `cancel_reminder`) live in `core/reminders.py`:
 a daemon thread polls SQLite, so they survive a restart. `parse_when` accepts ISO 8601 or
@@ -415,6 +418,30 @@ time-of-day greeting by name ("Good afternoon, Harsh. Bantu is ready."; "Hello" 
 Live on gpt-oss-120b to "I finally finished that report I was dreading": warm - "Great job getting that
 report done"; playful - "Congrats on slaying the dreaded report"; professional - "Report completed. Let
 me know if you need to schedule a review".
+
+## Weather and the briefing (R3, 2026-09-17)
+
+**Briefing only when asked** ("brief me"; Harsh's choice): `daily_briefing` is a core tool, so it is
+always available. It gathers the date, weather, today's calendar (R3c), reminders still to come today,
+and open records split into overdue / due today / other, plus decisions noted since yesterday; the
+model speaks it in the user's tone. Each section fails on its own - a weather outage still briefs.
+
+**Weather** is Open-Meteo: free, no key, verified live (geocoding ~0.7s, forecast ~0.9s). The city is
+typed once in Settings (General, with a Check button that looks it up in the background); nothing is
+guessed from the IP address. **Latin letters only** - the geocoder returns nothing for "काठमाडौं", and the
+error says so. Places are cached for the session and forecasts for 15 minutes; the city is read when
+the tool runs, so a change in Settings applies at once. `get_weather` can take any other city.
+
+**Reply language, again.** "Brief me." in English came back entirely in Hindi from
+`gemini-3.5-flash-lite`, because one noted commitment in the briefing was in Hindi. The general rule
+("reply in the language of the latest message, even when tool results are in another language") was
+not enough on its own, so `agent.language_hint` adds a concrete line to every request naming the script
+of the latest message. After: English briefing, the Hindi item quoted as written; romanized Nepali
+still answered in romanized Nepali.
+
+**Daily quota is real.** After a full day of stress runs every free quota was spent - all three Groq
+models' 200K tokens and every Gemini model - and Bantu said "Every provider is out of quota right now".
+Plan heavy live testing accordingly: a full `stress_real.py` pass costs ~130K tokens.
 
 ## The stack — all verified working on this machine
 

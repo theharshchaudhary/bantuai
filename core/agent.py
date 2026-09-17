@@ -35,21 +35,22 @@ the thing over describing how to do it. Chain several tools when a request needs
 it, and check your work — if a tool returns something unexpected, investigate
 rather than assuming it worked.
 
-Reply in the language and script of {user}'s latest message. You speak English,
-Hindi and Nepali; if they write Hindi or Nepali in Latin letters, reply the same way.
+Reply in the language and script of {user}'s latest message, even when tool results,
+notes or documents are in another language. You speak English, Hindi and Nepali; if
+they write Hindi or Nepali in Latin letters, reply the same way.
 
 Before saying what a file, document or web page contains, open and read it. Never
 work out contents from names, sizes or search snippets. Prefer the dedicated tools
 for files, apps, the system and the web over run_powershell whenever one fits.
 
 Be concise. No preamble, no restating the question, no offers of further help
-unless they are genuinely useful. {tone} When a tool fails, say plainly what failed and
-what you tried instead.
+unless they are genuinely useful. {tone} When a tool fails, say plainly what
+failed and what you tried instead.
 
-When {user} makes a promise, reaches a decision, takes on a task or mentions a deadline,
-note it with the notes tools, in their own words. Answer questions about their past only from notes, past conversations or
-remembered facts, and say when it happened; if nothing is found, say there is no
-record of it rather than guessing.
+When {user} makes a promise, reaches a decision, takes on a task or mentions a
+deadline, note it with the notes tools, in their own words. Answer questions about
+their past only from notes, past conversations or remembered facts, and say when it
+happened; if nothing is found, say there is no record of it rather than guessing.
 
 Never claim to have done something you did not do. If a tool errored, say so.
 If {user} says no to a step, that request is over: never look for another way
@@ -64,6 +65,20 @@ TONES = {
                "but brief and exact when doing work.",
     "professional": "Your manner is strictly professional: crisp, briefing style, no small talk.",
 }
+
+_DEVANAGARI = re.compile(r"[\u0900-\u097f]")
+
+
+def language_hint(text: str) -> str:
+    """A concrete instruction naming the script of the user's latest message.
+
+    The general rule was not enough for weaker models: asked "Brief me." in English,
+    gemini-3.5-flash-lite answered in Hindi because one noted commitment was in Hindi.
+    """
+    if _DEVANAGARI.search(text or ""):
+        return "Their latest message is in Devanagari script: reply in that language (Hindi or Nepali)."
+    return "Their latest message is written in Latin letters: reply in the same language, in Latin letters."
+
 
 # Appended to the system prompt for the one reply written after a "no".
 AFTER_DECLINE = """
@@ -84,7 +99,7 @@ _LEAKED_CALL = re.compile(r"<tool_call>.*?(?:</tool_call>|$)|<function=.*?(?:</f
 def clean_reply(text: str | None) -> str:
     text = text or ""
     cleaned = _LEAKED_CALL.sub("", text)
-    return (re.sub(r"[ 	]{2,}", " ", cleaned) if cleaned != text else cleaned).strip()
+    return (re.sub(r"[ \t]{2,}", " ", cleaned) if cleaned != text else cleaned).strip()
 
 
 #: Groq's free tier refuses any single request over 8,000 tokens - its per-minute
@@ -185,7 +200,7 @@ class Agent:
         self._declined = []
         self.memory.append(Message.user(user_text, images))
 
-        system = self._system()
+        system = self._system() + "\n\n" + language_hint(user_text)
         max_turns = int(getattr(self.settings, "max_tool_turns", 12))
         budget = int(getattr(self.settings, "max_output_tokens", 2048))
         temp = float(getattr(self.settings, "temperature", 0.7))

@@ -42,6 +42,8 @@ from core.memory import Memory
 from core.reminders import ReminderScheduler
 from core.providers.base import ProviderError
 from core.providers.router import build_router
+from core import briefing
+from core import weather as weather_tools
 from core.activity import Activity
 from core.knowledge import Knowledge
 from core.knowledge import register as register_knowledge
@@ -149,6 +151,16 @@ def build(settings: cfg.Settings | None = None) -> tuple[Agent, cfg.Settings]:
     _KNOWLEDGE = Knowledge(memory.db, knowledge_folder(settings), readers)
     register_knowledge(_REGISTRY, _KNOWLEDGE)
     _KNOWLEDGE.start_polling()  # the first sync runs in the background, not at startup
+
+    weather = weather_tools.Weather()
+    weather_tools.register(_REGISTRY, weather, settings)
+
+    def weather_line():
+        # Read when the briefing runs, so a city set in Settings counts straight away.
+        city = getattr(settings, "weather_city", "").strip()
+        return (lambda: weather.forecast(city).describe()) if city else None
+
+    briefing.register(_REGISTRY, memory, records, weather_line)
     # Core tools go with every request; everything else loads on demand. Sending
     # all of them fit only ~2 agent turns a minute into Groq's free token cap.
     _REGISTRY.enable_lazy_loading(base={"core"})

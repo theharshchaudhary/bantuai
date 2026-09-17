@@ -92,6 +92,7 @@ from voice.tts import detect_language  # noqa: E402
 _settings = cfg.Settings.load()
 # Never the user's real Documents\Bantu Knowledge: tasks write test documents here.
 _settings.knowledge_dir = str(SANDBOX / "knowledge")
+_settings.weather_city = "Kathmandu"
 agent, settings = main.build(_settings)
 settings.username = "Harsh"
 settings.voice_enabled = False
@@ -361,6 +362,17 @@ TASKS = [
     ("knowledge_hindi", "मेरे दस्तावेज़ों के अनुसार ग्लोबेक्स में हमारा वेंडर संपर्क कौन है?",
      lambda r: (called(r, "search_knowledge") and devanagari(r.reply) and says(r, "राम"),
                 "a Hindi answer from the Hindi document: Ram Sharma")),
+
+    # --- R3: briefing and weather (real Open-Meteo). ---
+    ("briefing", "Brief me.",
+     lambda r: (called(r, "daily_briefing") and says(r, "°", "degree", "rain", "cloud", "clear", "sun", "drizzle",
+                                                      "shower", "fog", "storm", "overcast"),
+                "gathers the briefing and includes Kathmandu weather")),
+
+    ("weather_other", "What's the weather going to be like in Pokhara tomorrow?",
+     lambda r: (any(t[0] == "get_weather" and "pokhara" in str(t[1]).lower() for t in r.tools)
+                and says(r, "pokhara") and bool(re.search(r"\d+\s*°|\d+\s*degrees", r.reply)),
+                "looks up Pokhara, not the home city, and gives temperatures")),
 
     ("open_commitments", "What are my outstanding commitments?",
      lambda r: (says(r, "बजट", "budget", "सीता", "sita") and not says(r, "vendor report"),
