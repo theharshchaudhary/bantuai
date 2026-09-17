@@ -9,6 +9,7 @@ Portable: stdlib only.
 
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
 import time
@@ -18,6 +19,26 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .providers.base import Message, ToolCall
+
+
+# Provider data riding on a tool call must survive storage. Gemini's
+# thought_signature is bytes, and without it Gemini rejects its own earlier call
+# the next time history is read back, which the agent does every turn.
+def _pack_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        k: {"b64": base64.b64encode(v).decode("ascii")} if isinstance(v, bytes) else v
+        for k, v in (meta or {}).items()
+    }
+
+
+def _unpack_meta(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}  # rows stored before meta was kept
+    return {
+        k: base64.b64decode(v["b64"]) if isinstance(v, dict) and set(v) == {"b64"} else v
+        for k, v in raw.items()
+    }
+
 
 #: Rough chars-per-token. Deliberately pessimistic — better to trim early than
 #: to have a provider reject an oversized request mid-task.
@@ -132,7 +153,10 @@ class Memory:
                 m.role,
                 m.content,
                 json.dumps(
-                    [{"id": t.id, "name": t.name, "arguments": t.arguments} for t in m.tool_calls]
+                    [
+                        {"id": t.id, "name": t.name, "arguments": t.arguments, "meta": _pack_meta(t.meta)}
+                        for t in m.tool_calls
+                    ]
                 )
                 if m.tool_calls
                 else None,
@@ -167,7 +191,11 @@ class Memory:
         calls = []
         if r["tool_calls"]:
             for d in json.loads(r["tool_calls"]):
-                calls.append(ToolCall(id=d["id"], name=d["name"], arguments=d["arguments"]))
+                calls.append(
+                    ToolCall(
+                        id=d["id"], name=d["name"], arguments=d["arguments"], meta=_unpack_meta(d.get("meta"))
+                    )
+                )
         content = r["content"]
         # Image bytes are deliberately not persisted - they would bloat the database
         # and re-billing them every turn forever is wasteful. A note keeps later

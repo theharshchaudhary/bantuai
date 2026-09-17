@@ -212,6 +212,28 @@ marked as they land, each pinned by `tests/test_readiness.py`.
      `400 Function call is missing a thought_signature`. Any multi-step tool task on Gemini fails,
      and so does any failover after Groq made a call. `smoke_live.py` never caught it because it
      calls providers directly, not through `Memory`.
+   - Also found on the way: **`thinking_budget=0` makes the lite Gemini models refuse every request**
+     with a bare `400 Request contains an invalid argument` that never mentions thinking, so
+     rotating onto them always failed.
+
+   **Fixed** (all verified live 2026-09-17):
+   - Groq: `max_retries=0` (no silent waits); a model at its limit rests for Groq's `retry-after`
+     and the next model takes the same request; when all rest, `RateLimited` carries the soonest
+     wait. Live: with `gpt-oss-120b` out for the day, `gpt-oss-20b` and qwen answered in <1s.
+   - Memory stores `ToolCall.meta` (bytes as base64). Gemini replays a call with no signature using
+     Google's placeholder `skip_thought_signature_validator` (verified: stripped -> 400, placeholder
+     -> accepted; a signature from one Gemini model is also accepted by another).
+   - Gemini retries a model once without the thinking budget when refused, remembering it per model
+     only if that fixed it. A 429 now **rests** the model (1h for `PerDay`, else `retryDelay`)
+     instead of dropping it for the session, and Gemini returns to its best model once rested.
+   - Live: a 3-step tool task on Gemini alone through Memory, and Groq starting a task then dropping
+     out with Gemini finishing it, both complete. Re-run of the stalled tasks: no turn over 5s.
+
+   **Open, next:** with SDK retries off, a brief all-Groq rest now fails over to **Gemini**, spending
+   the vision budget Harsh chose to protect. Plan: for a short wait (~20s or less) the router waits
+   and the agent emits a visible "waiting" event; only long waits fail over. Also seen: weaker
+   fallback models (qwen) reach for `run_powershell` to list files, and a decline then ends the task,
+   so the prompt should say to prefer dedicated tools.
 
 Solid: capital, time, remember/recall across conversations, reminder set/list/cancel, create/edit a
 file, read a .docx, dry-run organize, a 4-step read-and-summarize, example.com heading, battery and

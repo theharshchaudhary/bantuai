@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 import uuid
 import warnings
 from typing import Any
@@ -35,6 +37,36 @@ log = logging.getLogger("bantu.gemini")
 
 #: A model that times out this many times in a session is treated as dead.
 _TIMEOUT_STRIKES = 2
+
+#: Google's documented stand-in for a function call with no signature of its own:
+#: one Groq made before a failover, or one stored before signatures were kept.
+#: Verified live 2026-09-17: a replayed call with no signature is rejected
+#: ("Function call is missing a thought_signature"); with this it is accepted.
+SIGNATURE_PLACEHOLDER = b"skip_thought_signature_validator"
+
+#: The free quota is per model per day and resets at midnight Pacific; asking
+#: an exhausted model again once an hour costs one refused request.
+_DAILY_REST_S = 3600.0
+_DEFAULT_REST_S = 60.0
+
+
+def _rest_for(text: str) -> float:
+    """How long a model that answered 429 should be left alone."""
+    if "PerDay" in text:
+        return _DAILY_REST_S
+    delay = re.search(r"retryDelay['\"]?\s*:\s*['\"]?(\d+(?:\.\d+)?)s", text)
+    return float(delay.group(1)) + 1 if delay else _DEFAULT_REST_S
+
+
+def _rejects_thinking(exc: Exception) -> bool:
+    """Did the model refuse the explicit thinking budget?
+
+    Some say so. The lite models answer only "Request contains an invalid
+    argument", verified live 2026-09-17, which is why the budget is retried
+    without rather than trusted to be named in the error.
+    """
+    text = str(exc)
+    return "thinking" in text.lower() or "Request contains an invalid argument" in text
 
 
 def _classify(exc: Exception) -> ProviderError:
@@ -72,15 +104,16 @@ class GeminiProvider(LLMProvider):
         self._genai = genai
         self._client = genai.Client(api_key=api_key)
         self._models_cache: list[str] | None = None
-        self._model: str | None = None
         self._prefs = model_preferences or []
         self._timeout_ms = max(1, timeout_s) * 1000
         self._thinking_budget = thinking_budget
-        #: Set if a model rejects an explicit thinking budget.
-        self._no_thinking_cfg = False
+        #: Models that reject an explicit thinking budget.
+        self._no_thinking: set[str] = set()
         #: Ids that 404'd or timed out repeatedly. Never retried this session.
         self._dead: set[str] = set()
         self._strikes: dict[str, int] = {}
+        #: model id -> monotonic time it may be asked again, after a 429.
+        self._resting: dict[str, float] = {}
 
     # --- models -------------------------------------------------------------
 
@@ -98,10 +131,12 @@ class GeminiProvider(LLMProvider):
                 raise _classify(e) from e
         return self._models_cache
 
+    def _is_resting(self, model: str) -> bool:
+        return self._resting.get(model, 0.0) > time.monotonic()
+
     def resolve_model(self, preferences: list[str], exclude: set[str] | None = None) -> str:
-        skip = self._dead | (exclude or set())
-        if self._model and self._model not in skip:
-            return self._model
+        resting = {m for m in self._resting if self._is_resting(m)}
+        skip = self._dead | resting | (exclude or set())
         prefs = [p for p in (preferences or self._prefs) if p not in skip]
         try:
             have = set(self.available_models())
@@ -109,7 +144,6 @@ class GeminiProvider(LLMProvider):
             have = set()  # listing failed; trust the preference and let the call speak
         for p in prefs:
             if not have or p in have:
-                self._model = p
                 return p
         # Nothing preferred survived. Fall back to any listed flash model that
         # has not already proven dead — exclude the non-text variants.
@@ -121,8 +155,7 @@ class GeminiProvider(LLMProvider):
             and not any(x in m for x in ("image", "tts", "audio", "embed", "live", "omni"))
         ]
         if flash:
-            self._model = sorted(flash)[-1]
-            return self._model
+            return sorted(flash)[-1]
         raise ProviderError(
             f"no usable gemini model left (dead this session: {sorted(self._dead)})"
         )
@@ -130,12 +163,46 @@ class GeminiProvider(LLMProvider):
     def _demote(self, model: str, reason: str) -> None:
         """Stop using a model id for the rest of the session."""
         self._dead.add(model)
-        if self._model == model:
-            self._model = None
         log.warning("gemini: dropping model %s (%s)", model, reason)
 
     def supports_vision(self) -> bool:
         return True
+
+    def _all_resting(self, models: list[str]) -> RateLimited:
+        wait = max(1.0, min(self._resting.get(m, 0.0) for m in models) - time.monotonic())
+        return RateLimited(
+            f"gemini: every model is at its free limit; the next frees up in {wait:.0f}s",
+            retry_after=wait,
+        )
+
+    def _generate(self, model: str, contents: list[Any], cfg: dict[str, Any]) -> Any:
+        """One request to one model, with the thinking budget if it accepts one."""
+        types = self._genai.types
+        conf = dict(cfg)
+        thinking = self._thinking_budget >= 0 and model not in self._no_thinking
+        if thinking:
+            conf["thinking_config"] = types.ThinkingConfig(thinking_budget=self._thinking_budget)
+        try:
+            return self._send(model, contents, conf)
+        except Exception as e:
+            if not thinking or not _rejects_thinking(e):
+                raise
+        # Retry once without it, and remember only if that is what fixed it:
+        # the lite models' refusal is too generic to trust on its own.
+        conf.pop("thinking_config")
+        resp = self._send(model, contents, conf)
+        self._no_thinking.add(model)
+        log.info("gemini: %s rejects an explicit thinking budget; sending none", model)
+        return resp
+
+    def _send(self, model: str, contents: list[Any], conf: dict[str, Any]) -> Any:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*automatic function calling.*")
+            return self._client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=self._genai.types.GenerateContentConfig(**conf),
+            )
 
     # --- conversion ---------------------------------------------------------
 
@@ -159,7 +226,7 @@ class GeminiProvider(LLMProvider):
             parts.append(
                 types.Part(
                     function_call=types.FunctionCall(name=tc.name, args=tc.arguments),
-                    thought_signature=tc.meta.get("thought_signature"),
+                    thought_signature=tc.meta.get("thought_signature") or SIGNATURE_PLACEHOLDER,
                 )
             )
         return parts
@@ -210,10 +277,6 @@ class GeminiProvider(LLMProvider):
             # whole app. Several advertised ids do exactly that.
             "http_options": types.HttpOptions(timeout=self._timeout_ms),
         }
-        if self._thinking_budget >= 0 and not self._no_thinking_cfg:
-            cfg["thinking_config"] = types.ThinkingConfig(
-                thinking_budget=self._thinking_budget
-            )
         if system:
             cfg["system_instruction"] = system
         if tools:
@@ -233,19 +296,17 @@ class GeminiProvider(LLMProvider):
         tried: set[str] = set()
 
         for _ in range(attempts):
+            live = [p for p in self._prefs if p not in self._dead]
+            if live and all(self._is_resting(p) for p in live):
+                # Say when one frees up, rather than trying ids nobody verified.
+                raise self._all_resting(live)
             try:
                 model = self.resolve_model(self._prefs, exclude=tried)
             except ProviderError as e:
                 raise last or e from (last or e)
             tried.add(model)
             try:
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", message=".*automatic function calling.*")
-                    resp = self._client.models.generate_content(
-                        model=model,
-                        contents=contents,
-                        config=types.GenerateContentConfig(**cfg),
-                    )
+                resp = self._generate(model, contents, cfg)
                 self._strikes.pop(model, None)
                 break
             except Exception as e:
@@ -254,16 +315,14 @@ class GeminiProvider(LLMProvider):
                 if isinstance(err, ModelUnavailable):
                     self._demote(model, "404 / retired")
                     continue
-                if "thinking" in str(e).lower() and not self._no_thinking_cfg:
-                    log.info("gemini: %s rejects an explicit thinking budget", model)
-                    self._no_thinking_cfg = True
-                    cfg.pop("thinking_config", None)
-                    continue
                 if isinstance(err, RateLimited):
-                    # Free-tier quota is per model per day, so an exhausted id
-                    # says nothing about the next one. Rotating turns 20/day
-                    # into roughly 20 x (number of usable models).
-                    self._demote(model, "daily quota exhausted")
+                    # Free-tier quota is per model, so an exhausted id says
+                    # nothing about the next one: rotating turns 20/day into
+                    # roughly 20 x (number of usable models). A model rests
+                    # rather than being dropped, because quotas come back.
+                    rest = _rest_for(str(e))
+                    self._resting[model] = time.monotonic() + rest
+                    log.warning("gemini: %s is at its free limit, resting %.0fs", model, rest)
                     continue
                 if isinstance(err, TransientError):
                     # 503/504 happen: a model spikes or stalls. Move to the next
@@ -279,6 +338,9 @@ class GeminiProvider(LLMProvider):
                 raise err from e
 
         if resp is None:
+            live = [p for p in self._prefs if p not in self._dead]
+            if live and all(self._is_resting(p) for p in live):
+                raise self._all_resting(live)
             raise last or ProviderError("gemini: no model answered")
 
         # Read the raw parts rather than resp.function_calls: the thought

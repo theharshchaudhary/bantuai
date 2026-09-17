@@ -1,8 +1,9 @@
-"""Groq adapter — the failover brain.
+"""Groq adapter — the primary brain.
 
-Not the primary: the free tier caps at 8K tokens/minute, and an agent request
-carrying the full tool schema set plus history can approach 4K on its own, so
-two calls in a minute hit the wall.
+Free-tier limits are per model: each of gpt-oss-120b, gpt-oss-20b and
+qwen3.8-27b gets its own 8K tokens/minute and 200K tokens/day. A model at its
+limit rests for as long as Groq says and the next one takes the request, so one
+exhausted model does not bench the whole provider.
 
 Do not reach for Llama ids here. Groq moved the whole Llama family to Enterprise
 tier; the free tier is gpt-oss, Compound, Qwen and Whisper.
@@ -11,7 +12,9 @@ tier; the free tier is gpt-oss, Compound, Qwen and Whisper.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 import uuid
 from typing import Any
 
@@ -29,6 +32,11 @@ from .base import (
     TransientError,
     Usage,
 )
+
+log = logging.getLogger("bantu.groq")
+
+#: Rest for a limited model when Groq does not say how long.
+_DEFAULT_REST_S = 60.0
 
 
 def _classify(exc: Exception) -> ProviderError:
@@ -68,10 +76,15 @@ class GroqProvider(LLMProvider):
     ):
         from groq import Groq
 
-        self._client = Groq(api_key=api_key, timeout=float(timeout_s))
+        # No SDK retries. Its default of 2 honoured retry-after silently, so a
+        # per-minute limit looked like a model taking 28s to answer.
+        self._client = Groq(api_key=api_key, timeout=float(timeout_s), max_retries=0)
         self._models_cache: list[str] | None = None
-        self._model: str | None = None
         self._prefs = model_preferences or []
+        #: model id -> monotonic time it may be asked again.
+        self._resting: dict[str, float] = {}
+        #: Ids that do not exist for this key. Never retried this session.
+        self._dead: set[str] = set()
 
     # --- models -------------------------------------------------------------
 
@@ -84,27 +97,38 @@ class GroqProvider(LLMProvider):
         return self._models_cache
 
     def resolve_model(self, preferences: list[str]) -> str:
-        if self._model:
-            return self._model
-        prefs = preferences or self._prefs
+        """The best model this key offers, ignoring any that are resting."""
+        return self._candidates(preferences)[0]
+
+    def _candidates(self, preferences: list[str] | None = None) -> list[str]:
+        """Every usable model, best first."""
+        prefs = [p for p in (preferences or self._prefs) if p not in self._dead]
         try:
             have = set(self.available_models())
         except ProviderError:
-            have = set()
-        for p in prefs:
-            if not have or p in have:
-                self._model = p
-                return p
-        # Prefer a tool-capable text model; exclude audio and guard models.
-        cands = [
+            have = set()  # listing failed; trust the preferences and let the call speak
+        offered = [p for p in prefs if not have or p in have]
+        if offered:
+            return offered
+        # Nothing preferred is offered: any text model, excluding audio and guard models.
+        cands = sorted(
             m
             for m in have
-            if not any(x in m for x in ("whisper", "tts", "guard", "prompt-guard"))
-        ]
+            if m not in self._dead and not any(x in m for x in ("whisper", "tts", "guard", "prompt-guard"))
+        )
         if cands:
-            self._model = sorted(cands)[0]
-            return self._model
+            return cands
         raise ProviderError(f"no usable groq model; account offers {sorted(have)[:10]}")
+
+    def _rest(self, model: str, seconds: float) -> None:
+        self._resting[model] = time.monotonic() + seconds
+
+    def _all_resting(self, models: list[str]) -> RateLimited:
+        wait = max(1.0, min(self._resting.get(m, 0.0) for m in models) - time.monotonic())
+        return RateLimited(
+            f"groq: every model is at its free limit; the next frees up in {wait:.0f}s",
+            retry_after=wait,
+        )
 
     # --- conversion ---------------------------------------------------------
 
@@ -170,9 +194,7 @@ class GroqProvider(LLMProvider):
         temperature: float = 0.7,
         max_output_tokens: int = 2048,
     ) -> LLMResponse:
-        model = self.resolve_model(self._prefs)
         kwargs: dict[str, Any] = {
-            "model": model,
             "messages": self._to_messages(messages, system),
             "temperature": temperature,
             "max_tokens": max_output_tokens,
@@ -181,10 +203,36 @@ class GroqProvider(LLMProvider):
             kwargs["tools"] = self._to_tools(tools)
             kwargs["tool_choice"] = "auto"
 
-        try:
-            resp = self._client.chat.completions.create(**kwargs)
-        except Exception as e:
-            raise _classify(e) from e
+        models = self._candidates()
+        now = time.monotonic()
+        ready = [m for m in models if self._resting.get(m, 0.0) <= now]
+        if not ready:
+            raise self._all_resting(models)
+
+        resp, model, last = None, "", None
+        for model in ready:
+            try:
+                resp = self._client.chat.completions.create(model=model, **kwargs)
+                break
+            except Exception as e:
+                err = _classify(e)
+                if isinstance(err, RateLimited):
+                    rest = err.retry_after or _DEFAULT_REST_S
+                    self._rest(model, rest)
+                    log.warning("groq: %s is at its free limit for %.0fs; trying the next model", model, rest)
+                elif isinstance(err, ModelUnavailable):
+                    self._dead.add(model)
+                    log.warning("groq: dropping model %s (unavailable)", model)
+                elif isinstance(err, TransientError):
+                    log.info("groq: %s failed transiently; trying the next model", model)
+                else:
+                    raise err from e  # a problem with the request, which no other model would fix
+                last = err
+
+        if resp is None:
+            if all(self._resting.get(m, 0.0) > time.monotonic() for m in models):
+                raise self._all_resting(models)
+            raise last or ProviderError("groq: no model answered")
 
         choice = resp.choices[0].message
         calls = []

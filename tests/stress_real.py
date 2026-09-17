@@ -156,7 +156,7 @@ def called(run: Run, name: str) -> bool:
 
 
 def succeeded(run: Run, name: str) -> bool:
-    return any(t[0] == name and not t[2].startswith("Error") and "declined" not in t[2] for t in run.tools)
+    return any(t[0] == name and not t[2].startswith("Error") and "declined" not in t[2] and "said no" not in t[2] for t in run.tools)
 
 
 def says(run: Run, *words: str) -> bool:
