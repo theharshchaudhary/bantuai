@@ -743,6 +743,209 @@ check("the app uses that default rather than overriding it",
       'enable_lazy_loading(base={"core"})' in main_src and "keep_for_tasks" not in main_src)
 
 
+
+# --- speech never freezes the HUD, and starts after one sentence ---------------
+# Measured: edge-tts took up to 9.6s to render a 66-word reply as one file, and
+# speak() did that on its caller's thread - the HUD's UI thread - so the orb froze
+# for the whole time before a word was heard.
+
+print("\n[speech starts after one sentence and never blocks its caller]")
+from voice.tts import Speaker, split_sentences
+
+
+class SpeechSettings:
+    voice_enabled, voice_rate = True, "+4%"
+
+    def voice_for(self, code, gender=None):
+        return {"en": "en-voice", "hi": "hi-voice", "ne": "ne-voice"}[code]
+
+
+class FakeSpeaker(Speaker):
+    """Real threading and ordering; synthesis takes `synth_s`, each clip plays `clip_s`."""
+
+    def __init__(self, synth_s=0.3, clip_s=0.1, fail=()):
+        super().__init__(SpeechSettings())
+        self.synth_s, self.clip_s, self.fail = synth_s, clip_s, set(fail)
+        self.synthesized, self.played, self.voices = [], [], []
+        self._busy_until = 0.0
+        self._texts = {}
+
+    def _ensure_mixer(self):
+        self._mixer_ready = True
+        return True
+
+    def synthesize(self, text, voice, rate="+4%"):
+        _time.sleep(self.synth_s)
+        self.synthesized.append(text)
+        self.voices.append(voice)
+        if text in self.fail:
+            return None
+        path = Path(tempfile.mkdtemp()) / "clip.mp3"
+        path.write_bytes(b"mp3")
+        self._texts[str(path)] = text
+        return path
+
+    def _mixer_play(self, path):
+        self.played.append((self._texts[str(path)], _time.monotonic()))
+        self._busy_until = _time.monotonic() + self.clip_s
+
+    def _mixer_busy(self):
+        return _time.monotonic() < self._busy_until
+
+    def _mixer_halt(self):
+        self._busy_until = 0.0
+
+
+REPLY = ("There are two invoice files in that folder. The January one is for Acme and totals 4,200. "
+         "The February one is for Globex and totals 7,800. Together they come to twelve thousand rupees.")
+chunks = split_sentences(REPLY)
+check("a reply is split into sentences, in order", len(chunks) == 4 and " ".join(chunks) == REPLY, str(chunks))
+check("short sentences join the next rather than becoming their own clip",
+      split_sentences("OK. Done. Your battery is at sixty percent and charging.") ==
+      ["OK. Done. Your battery is at sixty percent and charging."])
+check("a short last sentence joins the one before",
+      split_sentences("Your battery is at sixty percent and charging. Nice.") ==
+      ["Your battery is at sixty percent and charging. Nice."])
+check("Hindi and Nepali sentence ends (danda) split too",
+      len(split_sentences("अभी सुबह के आठ बजकर सात मिनट हुए हैं, और मौसम साफ़ है। "
+                          "आज गुरुवार, सत्रह सितंबर है और दो रिमाइंडर बाकी हैं।")) == 2)
+
+sp = FakeSpeaker(synth_s=0.3, clip_s=0.1)
+t0 = _time.monotonic()
+started = sp.speak(REPLY)
+returned = _time.monotonic() - t0
+check("speak() returns at once instead of synthesizing first", started and returned < 0.1, f"{returned:.2f}s")
+check("it counts as speaking before the first word is audible", sp.is_speaking())
+sp.wait(10)
+check("every sentence is played, in order", [p[0] for p in sp.played] == chunks, str([p[0] for p in sp.played]))
+first_audio = sp.played[0][1] - t0
+check("the first sentence plays after one synthesis, not after all four",
+      first_audio < 0.6, f"{first_audio:.2f}s (all four would be 1.2s)")
+check("speaking ends when the last sentence does", not sp.is_speaking())
+
+sp = FakeSpeaker(synth_s=0.2, clip_s=0.3)
+sp.speak(REPLY)
+_time.sleep(0.35)  # first sentence is playing
+sp.stop()
+check("stop() ends speaking at once", not sp.is_speaking())
+_time.sleep(1.0)
+check("no later sentence plays after a stop", len(sp.played) == 1, str([p[0] for p in sp.played]))
+
+sp = FakeSpeaker(synth_s=0.25, clip_s=0.05)
+sp.speak(REPLY)
+_time.sleep(0.1)  # first sentence still synthesizing
+sp.speak("A new answer replaces the old one completely.")
+sp.wait(10)
+check("a new reply cuts off the old one, which never plays",
+      [p[0] for p in sp.played] == ["A new answer replaces the old one completely."], str([p[0] for p in sp.played]))
+
+sp = FakeSpeaker(synth_s=0.05, clip_s=0.02, fail={chunks[1]})
+sp.speak(REPLY)
+sp.wait(10)
+check("a sentence that fails to synthesize is skipped, the rest are said",
+      [p[0] for p in sp.played] == [chunks[0], chunks[2], chunks[3]], str([p[0] for p in sp.played]))
+
+sp = FakeSpeaker(synth_s=0.05, clip_s=0.05)
+t0 = _time.monotonic()
+sp.speak("Blocking mode is what the voice preview in setup uses, and it should wait.", blocking=True)
+check("blocking=True still waits for the end", not sp.is_speaking() and _time.monotonic() - t0 >= 0.1)
+
+sp = FakeSpeaker()
+sp.speak("अभी सुबह के आठ बजकर सात मिनट हुए हैं। आज गुरुवार है और आपके दो रिमाइंडर बाकी हैं।")
+sp.wait(10)
+check("one voice for the whole reply, chosen from its language", set(sp.voices) == {"hi-voice"}, str(sp.voices))
+check("nothing to say is still refused", FakeSpeaker().speak("  ") is False)
+
+
+
+# --- a long conversation must still fit Groq's single-request cap -------------
+# Found while planning past chats: Memory sent up to 8,000 tokens of history, and
+# Groq refuses any single request over its 8,000 tokens/minute with a 413 that
+# also says rate_limit_exceeded and carries retry-after. It was read as a rate
+# limit: every model rested, the router waited twice, then Gemini took it.
+
+print("\n[a long conversation still fits in one Groq request]")
+from core.agent import MIN_HISTORY_TOKENS, REQUEST_TOKEN_TARGET
+from core.memory import estimate_text_tokens, estimate_tokens
+from core.providers.base import RequestTooLarge
+from core.providers.groq import _classify as groq_classify
+
+TOO_LARGE = ("{'error': {'message': 'Request too large for model `openai/gpt-oss-20b` in organization `org_x` "
+             "service tier `on_demand` on tokens per minute (TPM): Limit 8000, Requested 10091, please reduce "
+             "your message size and try again.', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}")
+err = groq_classify(GroqError(413, TOO_LARGE, retry_after=16))
+check("Groq's 413 is 'too large', not a rate limit, despite saying rate_limit_exceeded",
+      isinstance(err, RequestTooLarge) and not isinstance(err, RateLimited), type(err).__name__)
+
+q = groq({MODELS[0]: GroqError(413, TOO_LARGE, retry_after=16), MODELS[1]: GroqError(413, TOO_LARGE, retry_after=16)})
+try:
+    q.chat([Message.user("x")])
+    check("a too-large request is raised", False)
+except RequestTooLarge:
+    check("a too-large request is raised at once: every Groq model has the same cap",
+          q._client.asked == [MODELS[0]], str(q._client.asked))
+check("...and no model is rested for it", q._resting == {}, str(q._resting))
+
+groq_big = Timed("groq", forever=RequestTooLarge("too large"))
+gem = Timed("gemini", vision=True)
+router, waits = ProviderRouter([groq_big, gem]), []
+t0 = _time.monotonic()
+r = router.chat([Message.user("x")], on_wait=lambda p, s: waits.append((p, s)))
+check("the router moves straight to Gemini, without waiting", r.provider == "gemini" and waits == []
+      and _time.monotonic() - t0 < 0.2, f"{r.provider} {waits}")
+check("...and does not bench Groq for the next, smaller request",
+      next(x for x in router.status() if x["provider"] == "groq")["ready"])
+
+mem = Memory(Path(tempfile.mkdtemp()) / "long.db")
+for i in range(40):
+    mem.append(Message.user(f"old question {i} " + "padding words " * 60))
+    mem.append(Message.assistant(f"old answer {i} " + "more padding " * 60))
+mem.append(Message.user("THE CURRENT QUESTION " + "x" * 30000))
+h = mem.history(max_tokens=1000)
+check("the current question survives even when it alone is over budget",
+      h and h[0].role == "user" and h[0].content.startswith("THE CURRENT QUESTION"), str(len(h)))
+
+mem = Memory(Path(tempfile.mkdtemp()) / "long2.db")
+for i in range(40):
+    mem.append(Message.user(f"old question {i} " + "padding words " * 60))
+    mem.append(Message.assistant(f"old answer {i} " + "more padding " * 60))
+
+
+class Sizes(LLMProvider):
+    name = "sizes"
+
+    def __init__(self):
+        self.seen = []
+
+    def available_models(self):
+        return ["s"]
+
+    def resolve_model(self, preferences):
+        return "s"
+
+    def supports_vision(self):
+        return False
+
+    def chat(self, messages, tools=None, system=None, **kw):
+        fixed = estimate_text_tokens(system or "") + sum(
+            estimate_text_tokens(t.name + t.description + json.dumps(t.parameters)) for t in (tools or []))
+        self.seen.append((estimate_tokens(messages) + fixed, messages[-1].content))
+        return LLMResponse(text="fits", provider=self.name, model="s")
+
+
+import json
+
+sizes = Sizes()
+agent = Agent(ProviderRouter([sizes]), ToolRegistry(), mem, S())
+before = estimate_tokens(mem.history(max_tokens=10**9))
+agent.run("what did we say earlier?")
+total, last = sizes.seen[0]
+check("the stored conversation really is over the cap", before > 8000, str(before))
+check("the request sent is trimmed under the target", total <= REQUEST_TOKEN_TARGET, f"{total} > {REQUEST_TOKEN_TARGET}")
+check("...keeping the newest message", last == "what did we say earlier?", str(last))
+check("...and as much recent history as fits, not just the question", total > MIN_HISTORY_TOKENS, str(total))
+
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 for f in FAIL:
     print("  FAILED:", f)

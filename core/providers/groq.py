@@ -27,6 +27,7 @@ from .base import (
     Message,
     ProviderError,
     RateLimited,
+    RequestTooLarge,
     ToolCall,
     ToolSpec,
     TransientError,
@@ -42,6 +43,10 @@ _DEFAULT_REST_S = 60.0
 def _classify(exc: Exception) -> ProviderError:
     code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     text = str(exc)
+    # Checked before rate limits: the 413 body also says rate_limit_exceeded.
+    # Verified 2026-09-17: "Request too large for model ... Limit 8000, Requested 10091".
+    if code == 413 or "Request too large" in text:
+        return RequestTooLarge(f"groq: request too large: {text}")
     if code == 429 or "rate_limit" in text or "429" in text:
         retry = None
         resp = getattr(exc, "response", None)

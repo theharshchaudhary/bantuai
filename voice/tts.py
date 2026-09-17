@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import queue
 import re
 import tempfile
 import threading
@@ -65,17 +66,57 @@ def strip_for_speech(text: str) -> str:
     return re.sub(r"\s{2,}", " ", t).strip()
 
 
+#: Replies are spoken a sentence at a time. Measured 2026-09-17: edge-tts takes
+#: ~1.1s before a short line exists as audio, but a 66-word reply synthesized as
+#: one file took up to 9.6s, all of it silent. Now the first sentence plays after
+#: about a second whatever the length, while the next is synthesized behind it.
+_SENTENCE_END = re.compile(r"(?<=[.!?।॥])\s+")
+#: Shorter sentences join the next one: "OK." is not worth its own request, and
+#: a gap after every two words sounds broken.
+_MIN_CHUNK = 40
+
+_DONE = object()
+
+
+def split_sentences(text: str, min_chars: int = _MIN_CHUNK) -> list[str]:
+    """Break text into speakable chunks of at least `min_chars`, in order."""
+    chunks: list[str] = []
+    cur = ""
+    for part in _SENTENCE_END.split(text):
+        part = part.strip()
+        if not part:
+            continue
+        cur = f"{cur} {part}".strip()
+        if len(cur) >= min_chars:
+            chunks.append(cur)
+            cur = ""
+    if cur:
+        if chunks:
+            chunks[-1] = f"{chunks[-1]} {cur}"
+        else:
+            chunks.append(cur)
+    return chunks
+
+
 class Speaker:
-    """Speaks text aloud, and can be interrupted."""
+    """Speaks text aloud, and can be interrupted.
+
+    `speak` returns at once. Synthesis and playback run on a background thread,
+    because both happened on the caller's thread before, and the caller was the
+    HUD's UI thread: the orb froze for as long as edge-tts took.
+    """
 
     def __init__(self, settings):
         self.settings = settings
         self._lock = threading.Lock()
-        self._playing = False
         self._mixer_ready = False
         self._tmp = Path(tempfile.gettempdir()) / "bantu_tts"
         self._tmp.mkdir(exist_ok=True)
         self._seq = 0
+        #: Bumped by stop(). Every thread of an older utterance sees the change and exits.
+        self._gen = 0
+        #: The utterance still synthesizing or playing, or 0.
+        self._active = 0
 
     # --- mixer --------------------------------------------------------------
 
@@ -91,12 +132,41 @@ class Speaker:
             log.warning("audio output unavailable: %s", e)
         return self._mixer_ready
 
+    def _mixer_play(self, path: Path) -> None:
+        import pygame
+
+        pygame.mixer.music.load(str(path))
+        pygame.mixer.music.play()
+
+    def _mixer_busy(self) -> bool:
+        if not self._mixer_ready:
+            return False
+        try:
+            import pygame
+
+            return bool(pygame.mixer.music.get_busy())
+        except Exception:
+            return False
+
+    def _mixer_halt(self) -> None:
+        if not self._mixer_ready:
+            return
+        try:
+            import pygame
+
+            if pygame.mixer.music.get_busy():
+                pygame.mixer.music.stop()
+            pygame.mixer.music.unload()
+        except Exception:
+            pass
+
     # --- synthesis ----------------------------------------------------------
 
     def synthesize(self, text: str, voice: str, rate: str = "+4%") -> Path | None:
         """Render text to an mp3 file. Returns None if synthesis fails."""
-        self._seq += 1
-        out = self._tmp / f"say_{self._seq}.mp3"
+        with self._lock:
+            self._seq += 1
+            out = self._tmp / f"say_{self._seq}.mp3"
 
         async def go():
             import edge_tts
@@ -113,69 +183,87 @@ class Speaker:
     # --- speaking -----------------------------------------------------------
 
     def speak(self, text: str, lang: str | None = None, blocking: bool = False) -> bool:
-        """Say something. Returns False if nothing could be spoken."""
+        """Start saying something. Returns False if there is nothing to say or no audio."""
         spoken = strip_for_speech(text)
         if not spoken:
             return False
         if not getattr(self.settings, "voice_enabled", True):
+            return False
+        if not self._ensure_mixer():
             return False
 
         code = lang or detect_language(spoken)
         voice = self.settings.voice_for(code)
         rate = getattr(self.settings, "voice_rate", "+4%")
 
-        path = self.synthesize(spoken, voice, rate)
-        if path is None:
-            return False
-        if not self._ensure_mixer():
-            return False
-
         self.stop()  # never overlap two replies
-        try:
-            import pygame
-
-            with self._lock:
-                pygame.mixer.music.load(str(path))
-                pygame.mixer.music.play()
-                self._playing = True
-        except Exception as e:
-            log.warning("playback failed: %s", e)
-            return False
-
+        with self._lock:
+            self._gen += 1
+            gen = self._active = self._gen
+        worker = threading.Thread(
+            target=self._say, args=(gen, split_sentences(spoken), voice, rate), name="bantu-speech", daemon=True
+        )
+        worker.start()
         if blocking:
-            self.wait()
+            worker.join(timeout=300)
         return True
 
-    def is_speaking(self) -> bool:
-        if not self._mixer_ready:
-            return False
-        try:
-            import pygame
+    def _say(self, gen: int, chunks: list[str], voice: str, rate: str) -> None:
+        """Synthesize ahead on one thread, play in order on this one."""
+        ready: queue.Queue = queue.Queue()
 
-            return bool(pygame.mixer.music.get_busy())
-        except Exception:
-            return False
+        def produce() -> None:
+            for chunk in chunks:
+                if gen != self._gen:
+                    break
+                ready.put(self.synthesize(chunk, voice, rate))
+            ready.put(_DONE)
+
+        threading.Thread(target=produce, name="bantu-speech-synth", daemon=True).start()
+        try:
+            while gen == self._gen:
+                path = ready.get()
+                if path is _DONE:
+                    break
+                if path is None:
+                    continue  # one sentence failed to synthesize; say the rest
+                with self._lock:
+                    if gen != self._gen:
+                        break
+                    try:
+                        self._mixer_play(path)
+                    except Exception as e:
+                        log.warning("playback failed: %s", e)
+                        break
+                while gen == self._gen and self._mixer_busy():
+                    time.sleep(0.03)
+                with self._lock:
+                    if gen == self._gen:
+                        self._mixer_halt()  # unload, so the file can be removed
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+        finally:
+            with self._lock:
+                if self._active == gen:
+                    self._active = 0
+
+    def is_speaking(self) -> bool:
+        """True from the moment speak() is called until the last sentence ends."""
+        return self._active != 0 or self._mixer_busy()
 
     def wait(self, timeout: float = 120.0) -> None:
         deadline = time.time() + timeout
         while self.is_speaking() and time.time() < deadline:
             time.sleep(0.05)
-        self._playing = False
 
     def stop(self) -> None:
-        """Cut playback immediately. This is barge-in."""
-        if not self._mixer_ready:
-            return
-        try:
-            import pygame
-
-            with self._lock:
-                if pygame.mixer.music.get_busy():
-                    pygame.mixer.music.stop()
-                pygame.mixer.music.unload()
-                self._playing = False
-        except Exception:
-            pass
+        """Cut speech immediately, including sentences not yet played. This is barge-in."""
+        with self._lock:
+            self._gen += 1
+            self._active = 0
+            self._mixer_halt()
 
     def shutdown(self) -> None:
         self.stop()

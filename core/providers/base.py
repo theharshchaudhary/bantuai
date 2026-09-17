@@ -47,6 +47,16 @@ class ModelUnavailable(ProviderError):
     """
 
 
+class RequestTooLarge(ProviderError):
+    """This request is bigger than the provider accepts at all.
+
+    Groq's free tier refuses any single request over its 8,000 tokens/minute
+    with a 413 whose body also says "rate_limit_exceeded" and which carries a
+    retry-after. Waiting never helps, so this is not a RateLimited: the other
+    Groq models share the same cap, and the router moves on at once.
+    """
+
+
 class ToolNotLoaded(ProviderError):
     """The model called a tool that exists but was not sent with this request.
 

@@ -57,7 +57,7 @@ plan to Bantu's constraints; he approved all four blocks). In order:
 
 | Step | What | Notes |
 |---|---|---|
-| R1 | Readiness polish | streamed replies, past chats in the panel, new-chat button |
+| R1 | Readiness polish | ~~streamed replies~~ replaced by faster speech (see below); past chats in the panel, new-chat button |
 | R2 | Memory + tasks | structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
 | R3 | Daily briefing + calendar | spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
 | R4 | Meeting notes | explicit start/stop with a visible indicator; chunked Groq Whisper transcript; summary, decisions, action items into memory; **transcript-only by default** (audio deleted), retention and delete controls; summaries state what was said with times, never judgments about people |
@@ -292,6 +292,35 @@ file, read a .docx, dry-run organize, a 4-step read-and-summarize, example.com h
 volume match the real values, Hindi and Nepali replies in the right language, refusing Defender,
 asking "what should I delete?" for a bare "Delete it". `.env` was blocked in code; no key leaked.
 Cricket World Cup 2023 answered correctly (Australia), from knowledge, no search.
+
+## Feel: speech and long conversations (R1, 2026-09-17)
+
+**Reply streaming was dropped, by measurement.** Streaming from the API was the planned "feel" fix,
+but Groq finishes a whole reply in 0.2-0.4s (60 chunks arrive together) and Gemini in ~1.5s (4
+chunks). Streaming would not show words any sooner, and it complicates failover. The real delays
+were elsewhere:
+
+- **Speech froze the HUD.** `Speaker.speak` synthesized the entire reply with edge-tts *before* playing
+  anything, on its caller's thread, which in the HUD is the UI thread. edge-tts measured 1.1-1.2s
+  for a short line but up to **9.6s** for a 66-word reply. Now `speak` returns at once (15ms; 265ms
+  on the first call while pygame's mixer starts). A background thread speaks sentence by sentence
+  while another synthesizes ahead, so the first sentence starts in ~1.4-1.9s whatever the length
+  (measured live, muted). `split_sentences` joins pieces under 40 chars and splits on the Devanagari
+  danda too. `stop()` bumps a generation counter: every thread of the old utterance exits, and a
+  sentence already synthesizing never plays. `is_speaking()` is true from `speak()` until the last
+  sentence ends, so the orb stays in its speaking state through the gaps. The pygame calls sit behind
+  `_mixer_play/_mixer_busy/_mixer_halt` so tests run the real threading with a fake player.
+- **A long conversation could not fit in one Groq request.** Memory sent up to 8,000 tokens of history,
+  and Groq refuses any single request over its 8,000 tokens/minute: `413 Request too large ... Limit
+  8000, Requested 10091`, with a body that *also* says `rate_limit_exceeded` and a `retry-after: 16`.
+  It was classified as a rate limit, so every model rested, the router waited twice, then Gemini took
+  it - on every request of a long HUD conversation. Now: `RequestTooLarge` is its own error (checked
+  before rate limits), Groq raises it without trying its other models (same cap) and rests nothing,
+  and the router fails over at once without waiting. The agent sizes history per request so system
+  prompt + tools + history stay under `REQUEST_TOKEN_TARGET` (6,500, estimated pessimistically), and
+  Memory never trims the latest user message or anything after it. Live: a 22,580-token stored
+  conversation went to Groq as 4,415- and 4,934-token requests and still recalled a codename given a
+  few messages earlier.
 
 ## The stack — all verified working on this machine
 

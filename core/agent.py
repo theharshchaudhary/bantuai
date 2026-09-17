@@ -8,11 +8,12 @@ Portable — knows nothing about Windows, PyQt, or where tools come from.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
-from .memory import Memory
+from .memory import Memory, estimate_text_tokens
 from .providers.base import (
     AllProvidersFailed,
     Image,
@@ -58,6 +59,13 @@ latest message, say what you did not do because they said no. Do not blame a
 policy or an error, and do not offer another way to do it."""
 
 SKIPPED_AFTER_DECLINE = "Not run: the user said no to an earlier step of this request."
+
+#: Groq's free tier refuses any single request over 8,000 tokens - its per-minute
+#: cap - so a long HUD conversation would otherwise push every request to Gemini.
+#: History is trimmed so system prompt + tools + history stay under this. Memory's
+#: estimate is pessimistic (3.6 chars/token), so real requests come in lower.
+REQUEST_TOKEN_TARGET = 6500
+MIN_HISTORY_TOKENS = 800
 
 # Appended to the system prompt for the one reply written when the steps run out.
 AFTER_TURN_CAP = """
@@ -161,7 +169,7 @@ class Agent:
         for turn in range(max_turns):
             # Recomputed every turn: load_tools changes what is available mid-task.
             specs = self.registry.specs()
-            history = self.memory.history()
+            history = self._history(system, specs)
             # Memory stores no image bytes, so re-attach this run's images to the
             # user turn they belong to. Without this the model is handed a
             # question about a picture it was never shown.
@@ -233,6 +241,13 @@ class Agent:
         self._emit("error", text=text)
         return AgentResult(text, max_turns, total_calls, provider, model, stopped_early=True)
 
+    def _history(self, system: str, specs: list) -> list[Message]:
+        """As much recent history as fits in one request beside the prompt and tools."""
+        fixed = estimate_text_tokens(system) + sum(
+            estimate_text_tokens(s.name + s.description + json.dumps(s.parameters)) for s in specs
+        )
+        return self.memory.history(max_tokens=max(MIN_HISTORY_TOKENS, REQUEST_TOKEN_TARGET - fixed))
+
     def _waiting(self, provider: str, seconds: float) -> None:
         self._emit("waiting", text=f"{provider} free limit", seconds=seconds)
 
@@ -290,7 +305,7 @@ class Agent:
         text, provider, model = "", "", ""
         try:
             resp = self.router.chat(
-                self.memory.history(),
+                self._history(system, []),
                 tools=None,
                 system=system,
                 temperature=temp,

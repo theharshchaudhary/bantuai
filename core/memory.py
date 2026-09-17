@@ -102,6 +102,10 @@ def estimate_tokens(messages: Iterable[Message]) -> int:
     return int(n / CHARS_PER_TOKEN)
 
 
+def estimate_text_tokens(text: str) -> int:
+    return int(len(text or "") / CHARS_PER_TOKEN)
+
+
 def _fts_query(text: str) -> str:
     """Turn free text into a safe FTS5 MATCH expression.
 
@@ -172,18 +176,23 @@ class Memory:
         """Recent history, newest-biased, trimmed to a token budget.
 
         Tool results are dropped before their calls when trimming, because a
-        provider rejects a tool result whose originating call is missing.
+        provider rejects a tool result whose originating call is missing. The
+        latest user message and everything after it are never trimmed: that is
+        the request being worked on, and without it the model answers nothing.
         """
         rows = self.db.execute(
             "SELECT * FROM messages WHERE conversation=? ORDER BY id", (self.conversation,)
         ).fetchall()
         msgs = [self._to_message(r) for r in rows]
+        protected = max((i for i, m in enumerate(msgs) if m.role == "user"), default=len(msgs))
 
-        while msgs and estimate_tokens(msgs) > max_tokens:
+        while protected > 0 and estimate_tokens(msgs) > max_tokens:
             msgs.pop(0)
+            protected -= 1
             # Never start on an orphaned tool result.
-            while msgs and msgs[0].role == "tool":
+            while protected > 0 and msgs and msgs[0].role == "tool":
                 msgs.pop(0)
+                protected -= 1
         return msgs
 
     @staticmethod
