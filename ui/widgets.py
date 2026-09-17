@@ -296,6 +296,7 @@ class ChatPanel(QWidget):
 
     submitted = pyqtSignal(str)
     listen_requested = pyqtSignal()
+    settings_requested = pyqtSignal()
     closed = pyqtSignal()
 
     def __init__(self, hotkey_label: str = "") -> None:
@@ -323,6 +324,22 @@ class ChatPanel(QWidget):
         head.addStretch(1)
         self.status = _label("ready", f"color:{INK_SOFT};font-size:11px;")
         head.addWidget(self.status)
+        self.gear = QPushButton()
+        self.gear.setFixedSize(22, 22)
+        self.gear.setCursor(Qt.PointingHandCursor)
+        self.gear.setToolTip("Settings")
+        gear_icon = ASSETS / "Settings.png"
+        if gear_icon.exists():
+            self.gear.setIcon(QIcon(str(gear_icon)))
+            self.gear.setIconSize(QSize(14, 14))
+        else:
+            self.gear.setText("⚙")
+        self.gear.setStyleSheet(
+            f"QPushButton{{background:transparent;color:{INK_SOFT};border:none;}}"
+            f"QPushButton:hover{{background:{SURFACE_2};border-radius:5px;}}"
+        )
+        self.gear.clicked.connect(self.settings_requested.emit)
+        head.addWidget(self.gear)
         close = QPushButton("✕")
         close.setFixedSize(22, 22)
         close.setCursor(Qt.PointingHandCursor)

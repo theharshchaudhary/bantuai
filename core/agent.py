@@ -91,15 +91,20 @@ class Agent:
             except Exception:  # a broken UI callback must not kill the task
                 log.exception("event handler raised")
 
+    @property
+    def _user(self) -> str:
+        """The user's name, or a neutral stand-in when setup has not asked yet."""
+        return (getattr(self.settings, "username", "") or "").strip() or "the user"
+
     def _system(self) -> str:
         facts = self.memory.all_facts(limit=40)
         block = ""
         if facts:
             joined = "\n".join(f"- {f}" for f in facts)
-            block = f"\n\nThings you already know about {self.settings.username}:\n{joined}"
+            block = f"\n\nThings you already know about {self._user}:\n{joined}"
         prompt = SYSTEM_TEMPLATE.format(
             assistant=self.settings.assistant_name,
-            user=self.settings.username,
+            user=self._user,
             facts=block,
         )
         if getattr(self.registry, "lazy", False):

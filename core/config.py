@@ -109,10 +109,21 @@ class Settings:
     )
 
     # --- identity -----------------------------------------------------------
-    username: str = "Harsh"
+    #: Asked during first-run setup. Was hard-coded to the developer's name,
+    #: which every other user would have been called.
+    username: str = ""
     assistant_name: str = "Bantu"
 
+    # --- setup --------------------------------------------------------------
+    #: False until first-run setup completes. Keys found in .env do not count:
+    #: setup moves them into the credential store.
+    onboarded: bool = False
+
     # ------------------------------------------------------------------------
+    @property
+    def display_name(self) -> str:
+        return self.username.strip() or "the user"
+
     def voice_for(self, lang: str, gender: str | None = None) -> str:
         """Voice id for a reply language. Falls back to English for unknown languages."""
         table = self.voices.get(lang) or self.voices["en"]
@@ -190,6 +201,34 @@ def delete_key(name: str) -> None:
         keyring.delete_password(SERVICE, name)
     except Exception:
         pass
+
+
+def key_source(name: str) -> str | None:
+    """Where a key currently comes from: 'keyring', 'environment', '.env', or None."""
+    try:
+        import keyring
+
+        if keyring.get_password(SERVICE, name):
+            return "keyring"
+    except Exception:
+        pass
+    env_name = KEY_NAMES.get(name, name)
+    if os.environ.get(env_name) or os.environ.get(env_name.upper()):
+        return "environment"
+    try:
+        from dotenv import dotenv_values
+
+        vals = dotenv_values(".env")
+        if vals.get(env_name) or vals.get(name):
+            return ".env"
+    except Exception:
+        pass
+    return None
+
+
+def needs_onboarding(settings: "Settings") -> bool:
+    """First-run setup is needed until it has been completed with a working key."""
+    return not settings.onboarded or not configured_providers()
 
 
 def configured_providers() -> list[str]:

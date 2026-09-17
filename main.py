@@ -94,8 +94,8 @@ _LISTENER = None
 _ANNOUNCERS: list = []
 
 
-def build() -> tuple[Agent, cfg.Settings]:
-    settings = cfg.Settings.load()
+def build(settings: cfg.Settings | None = None) -> tuple[Agent, cfg.Settings]:
+    settings = settings or cfg.Settings.load()
     router = build_router(settings)
     memory = Memory(cfg.user_data_dir() / "history.db")
 
@@ -186,8 +186,8 @@ def build() -> tuple[Agent, cfg.Settings]:
     return agent, settings
 
 
-def run_hud(agent: Agent, settings: cfg.Settings) -> int:
-    """Launch the floating orb. The default front end."""
+def run_hud() -> int:
+    """Launch the floating orb, running first-time setup if it is needed."""
     from PyQt5.QtCore import QCoreApplication, QLockFile, Qt
     from PyQt5.QtWidgets import QApplication
 
@@ -204,6 +204,25 @@ def run_hud(agent: Agent, settings: cfg.Settings) -> int:
     if not lock.tryLock(100):
         print("Bantu is already running - look for the orb or the tray icon.")
         return 0
+
+    settings = cfg.Settings.load()
+    if cfg.needs_onboarding(settings):
+        from ui.onboarding import SetupWizard
+        from ui.setup_parts import real_services
+
+        # A new user gets setup, not a console error about missing keys.
+        if SetupWizard(settings, real_services()).exec_() != SetupWizard.Accepted:
+            lock.unlock()
+            return 0
+
+    try:
+        agent, settings = build(settings)
+    except ProviderError as e:
+        lock.unlock()
+        from PyQt5.QtWidgets import QMessageBox
+
+        QMessageBox.warning(None, "Bantu", f"Bantu could not start: {e}")
+        return 1
 
     from ui.app import BantuApp
 
@@ -231,18 +250,20 @@ HELP = """\
 
 def main() -> int:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if not args and "--cli" not in sys.argv:
+        return run_hud()
+
     try:
         agent, settings = build()
     except ProviderError as e:
         print(f"{RED}{e}{RESET}")
+        print("Run Bantu without --cli once to set up your keys.")
         return 1
 
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
     if args:  # one-shot mode
         print(agent.run(" ".join(args)).text)
         return 0
-    if "--cli" not in sys.argv:
-        return run_hud(agent, settings)
 
     print(
         BANNER.format(

@@ -58,6 +58,17 @@ class ProviderRouter:
             raise ValueError("router needs at least one provider")
         self._states = [_State(p) for p in self.providers]
 
+    def replace(self, providers: list[LLMProvider]) -> None:
+        """Swap in new providers in place, e.g. after keys change in Settings.
+
+        In place, not a new router: tools such as look_at_screen captured this
+        object when they were registered, and must see the new keys too.
+        """
+        if not providers:
+            raise ValueError("router needs at least one provider")
+        self.providers = list(providers)
+        self._states = [_State(p) for p in self.providers]
+
     # --- introspection ------------------------------------------------------
 
     @property
@@ -150,6 +161,11 @@ class ProviderRouter:
                     f"cooling down {max(0, round(s.blocked_until - time.monotonic()))}s"
                 )
         raise AllProvidersFailed(failures)
+
+
+def build_providers(settings=None) -> list[LLMProvider]:
+    """Providers for every stored key, in the configured order."""
+    return build_router(settings).providers
 
 
 def build_router(settings=None) -> ProviderRouter:

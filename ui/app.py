@@ -123,8 +123,12 @@ class BantuApp(QObject):
         speaker=None,
         install_hotkey: bool = True,
         show_tray: bool = True,
+        services: Any = None,
     ):
         super().__init__()
+        self.services = services
+        self._hotkey_enabled = install_hotkey
+        self._settings_dialog = None
         self.agent = agent
         self.settings = settings
         self.speaker = speaker
@@ -157,6 +161,7 @@ class BantuApp(QObject):
         self.panel.submitted.connect(self.ask)
         self.panel.listen_requested.connect(self.listen)
         self.panel.closed.connect(self.panel.hide)
+        self.panel.settings_requested.connect(self.open_settings)
         self._hotkey_pressed.connect(self.listen)
         self.announced.connect(self._on_announced)
 
@@ -357,6 +362,10 @@ class BantuApp(QObject):
         self._voice_action.triggered.connect(self._toggle_voice)
         menu.addAction(self._voice_action)
 
+        settings_action = QAction("Settings…", menu)
+        settings_action.triggered.connect(self.open_settings)
+        menu.addAction(settings_action)
+
         menu.addSeparator()
         quit_action = QAction("Quit Bantu", menu)
         quit_action.triggered.connect(self.quit)
@@ -379,6 +388,74 @@ class BantuApp(QObject):
         if not checked and self.speaker:
             self.speaker.stop()
 
+    # --- settings -----------------------------------------------------------
+
+    def open_settings(self) -> None:
+        from core import config as cfg
+
+        from .settings_dialog import SettingsDialog
+        from .setup_parts import real_services
+
+        if self._settings_dialog is not None and self._settings_dialog.isVisible():
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+            return
+        dialog = SettingsDialog(
+            self.settings,
+            self.services or real_services(),
+            str(cfg.user_data_dir()),
+            self.connection_status,
+        )
+        dialog.applied.connect(self.apply_settings)
+        self._settings_dialog = dialog
+        dialog.show()
+
+    def connection_status(self) -> str:
+        lines = []
+        for st in self.agent.router.status():
+            name = st["provider"].capitalize()
+            if st["disabled"]:
+                state = "key rejected - check it in Keys"
+            elif st["cooldown_s"]:
+                state = f"resting for {st['cooldown_s']}s after hitting its free limit"
+            else:
+                state = "ready"
+            lines.append(f"{name}: {state} · {st['calls']} request(s) this session")
+        return "\n".join(lines) or "No services connected."
+
+    def apply_settings(self, changes: set) -> None:
+        """Make saved settings take effect now, without a restart."""
+        if "hotkey" in changes:
+            self.set_hotkey(self.settings.hotkey)
+        if "keys" in changes:
+            try:
+                from core.providers.router import build_providers
+
+                self.agent.router.replace(build_providers(self.settings))
+            except Exception as e:
+                self.panel.add_message(f"The new keys could not be used: {e}", "assistant")
+        if "mic_device" in changes and self.worker.listener is not None:
+            self.worker.listener.device = self.settings.mic_device
+            self.worker.listener._threshold = None  # recalibrate for the new microphone
+        if "voice_enabled" in changes and not self.settings.voice_enabled and self.speaker:
+            self.speaker.stop()
+        if changes:
+            self.panel.set_status("settings saved")
+
+    def set_hotkey(self, combo: str) -> None:
+        if self.hotkey_installed:
+            try:
+                import keyboard
+
+                keyboard.remove_hotkey(self.hotkey)
+            except Exception:
+                pass
+            self.hotkey_installed = False
+        self.hotkey = combo
+        if self._hotkey_enabled:
+            self._install_hotkey()
+        self.panel.mic.setToolTip(f"Speak ({hotkey_label(combo)} anywhere)")
+
     # --- global hotkey ------------------------------------------------------
 
     def _install_hotkey(self) -> None:
@@ -397,6 +474,8 @@ class BantuApp(QObject):
     # --- lifecycle ----------------------------------------------------------
 
     def shutdown(self) -> None:
+        if self._settings_dialog is not None:
+            self._settings_dialog.close()
         if self.hotkey_installed:
             try:
                 import keyboard

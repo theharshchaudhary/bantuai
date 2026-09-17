@@ -43,11 +43,21 @@ Owner: Harsh. Repo: `theharshchaudhary/bantuai`, branch `main`.
 | 06 | Voice — Groq Whisper in, edge-tts out, barge-in | **done** |
 | 07 | HUD — floating orb, chat panel, tray, global hotkey | **done** |
 | 08 | GUI control — click, type, keys, scroll via OCR; vision fallback for icons | **done** |
-| 09 | Onboarding — first-run wizard, settings | **next** |
-| 10 | Packaging — PyInstaller `.exe` | — |
+| 09 | Onboarding — first-run setup, Settings window, live key checks | **done** |
+| 10 | Packaging — PyInstaller `.exe` | **next** |
 | 11 | README rewrite | — |
 
 Post-v1: proactive trigger engine (v1.1), semantic memory + habits (v1.2), Home Assistant + phone (v2).
+
+Leads from reading Shreshth Kaushik's "advanced Jarvis" gists (2026-09-17) — ideas only, the
+gists state no license, so no code is copied:
+- **Image generation via Pollinations.ai**, which his readme calls free with no key. Unverified —
+  test it the way Gemini and Groq were tested before building on it.
+- **A knowledge folder**: drop `.txt` files to teach Bantu. His uses FAISS plus torch and
+  sentence-transformers; Bantu can index into the existing FTS5 with no download.
+- Not adopted: his chat, intent and vision models are all Groq Llama, which is Enterprise-only on
+  the free tier; his `brain_service.py` is a fixed intent classifier, the design Bantu retired;
+  and rotating several Groq keys to multiply limits likely breaches Groq's terms.
 
 ## Architecture
 
@@ -62,15 +72,18 @@ core/                   PORTABLE — no desktop imports allowed
 platform_desktop/       Windows tools, registered INTO core
   files.py system.py web.py shell.py ocr.py gui.py
 voice/                  stt.py, tts.py
-ui/                     widgets.py (orb, panel, chips, confirm bar), app.py (worker thread, tray, hotkey)
+ui/                     widgets.py (orb, panel, chips, confirm bar), app.py (worker thread, tray, hotkey),
+                        onboarding.py (first-run setup), settings_dialog.py, setup_parts.py (shared)
 ```
 
 One loop handles everything. **No intent routing** — the model reads the tool list and decides.
 The old `Backend/Model.py` Cohere router is now retired.
 
 Run it:
-- `.venv/Scripts/python.exe main.py` — the floating orb (default). Click it, or press
-  **Ctrl+Alt+Space** anywhere to speak. Quit from the tray icon; closing the panel only hides it.
+- `.venv/Scripts/python.exe main.py` — the floating orb (default). **On first launch it opens
+  setup** (name → keys → voice) instead of failing for lack of keys. Click the orb, or press
+  **Ctrl+Alt+Space** anywhere to speak. Settings is in the tray menu and on the panel's gear.
+  Quit from the tray icon; closing the panel only hides it.
 - `main.py --cli` — terminal REPL (`-v` for tool output; `/tools`, `/status`, `/facts`, `/new`).
 - `main.py "a question"` — one-shot.
 
@@ -188,6 +201,10 @@ Tests:
 - `tests/test_lazy_tools.py` — 35 checks, no API key: what goes up front, loading, expiry,
   permission tiers still enforced, Groq's real rejection text, the router not failing over,
   agent recovery, and the size saving measured on the real 59 tools.
+- `tests/test_phase9.py` — 79 checks, Qt offscreen with **fake services**: never touches the network,
+  the real credential store, audio, or the real config (APPDATA points at a temp folder). Covers
+  every setup page, key checks off the UI thread, keys found in .env, abandoning setup, hotkey
+  rules, and Settings applying changes to the running app without a restart.
 - `tests/test_fixes.py` — 34 checks guarding bugs that actually shipped: images surviving the
   agent loop, database migration, reminders, multi-word screen matching, region parsing.
   Add a `test_phaseN.py` per phase and keep them key-free.
@@ -315,6 +332,34 @@ Stylesheets must target object names (`QFrame#shell`), never a bare `QFrame{}`: 
 Verified end to end: Bantu's real agent, given "click the Launch probe button, then type Bantu was
 here", chose `click_text` -> `click_text` -> `type_text` itself and the target app recorded
 exactly that. Moving the mouse into a screen corner aborts any action (pyautogui fail-safe).
+
+## First-run setup and Settings
+
+**Setup runs when** `settings.onboarded` is false or no key is configured (`cfg.needs_onboarding`).
+Keys found in `.env` or the credential store are **tested automatically** when setup opens; stored
+does not mean working. Nothing is saved until the last page, and finishing moves keys into Windows
+Credential Manager. Harsh's own machine still has keys only in `.env` and no `config.json`, so his
+next launch shows setup, prefilled.
+
+**Key checking** (`core/providers/validate.py`) lists models rather than generating anything, so it
+costs no generation quota — which matters for Gemini's 20/day. It distinguishes a rejected key
+from being offline. Verified live 2026-09-17: both real keys pass (Groq 13 models, Gemini 58);
+well-formed fake keys are rejected by the real services; blank and pasted-with-spaces keys are
+caught before any network call. **Do not validate by key prefix**: Harsh's working Gemini key
+starts `AQ.`, not the long-standing `AIza`.
+
+**Settings apply without a restart.** The dialog reports what changed; the app re-registers a new
+hotkey, swaps providers into the *same* router object via `ProviderRouter.replace()` (tools such as
+`look_at_screen` captured that object at registration), and recalibrates a newly chosen
+microphone. A changed key must pass its test before Save is allowed; unchanged stored keys are
+never re-checked just by opening Settings.
+
+**Hotkey rules** (`validate_hotkey`): must include Ctrl, Alt or Windows. Shift alone is refused —
+Shift+A is how people type a capital A, and a global hook on it would swallow typing everywhere.
+Ubiquitous shortcuts (Ctrl+Space, Ctrl+C/V/X/Z/S, Alt+Tab, Alt+F4) are refused.
+
+The default `username` was hard-coded to "Harsh" — every other user would have been called that.
+It is now asked during setup, and the agent says "the user" when it is blank.
 
 ## Language and voice
 
