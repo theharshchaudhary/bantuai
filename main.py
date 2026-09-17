@@ -44,6 +44,7 @@ from core.providers.base import ProviderError
 from core.providers.router import build_router
 from core import briefing
 from core import weather as weather_tools
+from core import events as calendar_tools
 from core.activity import Activity
 from core.knowledge import Knowledge
 from core.knowledge import register as register_knowledge
@@ -102,6 +103,7 @@ _LISTENER = None
 _ANNOUNCERS: list = []
 _KNOWLEDGE: Knowledge | None = None
 _ACTIVITY: Activity | None = None
+_CALENDAR: calendar_tools.Calendar | None = None
 
 
 def knowledge_folder(settings: cfg.Settings) -> Path:
@@ -160,7 +162,16 @@ def build(settings: cfg.Settings | None = None) -> tuple[Agent, cfg.Settings]:
         city = getattr(settings, "weather_city", "").strip()
         return (lambda: weather.forecast(city).describe()) if city else None
 
-    briefing.register(_REGISTRY, memory, records, weather_line)
+    global _CALENDAR
+    _CALENDAR = calendar_tools.Calendar(memory.db)
+    calendar_tools.register(_REGISTRY, _CALENDAR)
+    # The secret iCal address grants read access to the calendar, so it lives with the keys.
+    _CALENDAR.start_polling(lambda: cfg.get_key("calendar"))
+
+    briefing.register(
+        _REGISTRY, memory, records, weather_line,
+        events_for=lambda: (lambda day: [e.short() for e in _CALENDAR.on_day(day)]),
+    )
     # Core tools go with every request; everything else loads on demand. Sending
     # all of them fit only ~2 agent turns a minute into Groq's free token cap.
     _REGISTRY.enable_lazy_loading(base={"core"})
@@ -224,7 +235,10 @@ def build(settings: cfg.Settings | None = None) -> tuple[Agent, cfg.Settings]:
             except Exception:
                 pass
 
-    scheduler = ReminderScheduler(memory, announce, records=records)
+    scheduler = ReminderScheduler(
+        memory, announce, records=records, calendar=_CALENDAR,
+        alert_minutes=lambda: getattr(settings, "event_alert_minutes", 0),
+    )
     scheduler.start()
 
     global _SPEAKER, _LISTENER
@@ -288,7 +302,8 @@ def run_hud() -> int:
     from ui.app import BantuApp
 
     hud = BantuApp(
-        agent, settings, listener=_LISTENER, speaker=_SPEAKER, knowledge=_KNOWLEDGE, activity=_ACTIVITY
+        agent, settings, listener=_LISTENER, speaker=_SPEAKER, knowledge=_KNOWLEDGE, activity=_ACTIVITY,
+        calendar=_CALENDAR,
     )
     _ANNOUNCERS.append(hud.announced.emit)
     try:

@@ -24,6 +24,16 @@ from .setup_parts import (
 )
 
 
+GOOGLE_ICAL_HELP = "https://support.google.com/calendar/answer/37648"
+
+EVENT_ALERT_CHOICES = (
+    (0, "Don't remind me"),
+    (5, "Remind me 5 minutes before"),
+    (10, "Remind me 10 minutes before"),
+    (15, "Remind me 15 minutes before"),
+    (30, "Remind me 30 minutes before"),
+)
+
 TONE_CHOICES = (
     ("warm", "Warm professional - friendly, respectful, never gushing"),
     ("playful", "Playful - witty and light, still exact when working"),
@@ -44,10 +54,12 @@ class SettingsDialog(QDialog):
         parent: QWidget | None = None,
         knowledge: Any = None,
         activity: Any = None,
+        calendar: Any = None,
     ):
         super().__init__(parent)
         self.knowledge = knowledge
         self.activity = activity
+        self.calendar = calendar
         self.settings = settings
         self.services = services
         self.data_dir = data_dir
@@ -66,6 +78,7 @@ class SettingsDialog(QDialog):
         tab_font.setPixelSize(13)
         self.tabs.tabBar().setFont(tab_font)
         self.tabs.addTab(self._general(), "General")
+        self.tabs.addTab(self._day(), "Your day")
         self.tabs.addTab(self._keys(), "Keys")
         if self.activity is not None:
             self.tabs.addTab(self._activity(), "Activity")
@@ -119,21 +132,6 @@ class SettingsDialog(QDialog):
         lay.addWidget(self.tone)
 
         lay.addSpacing(6)
-        lay.addWidget(label("WEATHER CITY", "section"))
-        row = QHBoxLayout()
-        self.city = QLineEdit(getattr(self.settings, "weather_city", "") or "")
-        self.city.setPlaceholderText("e.g. Kathmandu - in Latin letters; empty for no weather")
-        row.addWidget(self.city, 1)
-        self.check_city = QPushButton("Check")
-        self.check_city.setEnabled(self.services.find_place is not None)
-        self.check_city.clicked.connect(self._check_city)
-        row.addWidget(self.check_city)
-        lay.addLayout(row)
-        self.city_result = label("", "hint")
-        lay.addWidget(self.city_result)
-        self.city.textChanged.connect(lambda _t: self.city_result.setText(""))
-
-        lay.addSpacing(6)
         lay.addWidget(label("VOICE", "section"))
         self.voice = VoicePicker(self.settings, self.services, lambda: self.name.text())
         lay.addWidget(self.voice)
@@ -152,6 +150,38 @@ class SettingsDialog(QDialog):
         self.hotkey.setPlaceholderText("e.g. ctrl+alt+space")
         lay.addWidget(self.hotkey)
         lay.addWidget(label("Works from any app. It needs Ctrl, Alt or Windows.", "hint"))
+        lay.addStretch(1)
+        return page
+
+    def _day(self) -> QWidget:
+        # Its own tab: added to General, seven sections crushed every input into a clipped line.
+        page, lay = self._tab()
+        lay.addWidget(label("Say \"brief me\" any time for the weather, today's calendar, reminders, "
+                            "and what is due or overdue.", "lead"))
+        lay.addSpacing(6)
+        lay.addWidget(label("WEATHER CITY", "section"))
+        row = QHBoxLayout()
+        self.city = QLineEdit(getattr(self.settings, "weather_city", "") or "")
+        self.city.setPlaceholderText("e.g. Kathmandu - in Latin letters; empty for no weather")
+        row.addWidget(self.city, 1)
+        self.check_city = QPushButton("Check")
+        self.check_city.setEnabled(self.services.find_place is not None)
+        self.check_city.clicked.connect(self._check_city)
+        row.addWidget(self.check_city)
+        lay.addLayout(row)
+        self.city_result = label("", "hint")
+        lay.addWidget(self.city_result)
+        self.city.textChanged.connect(lambda _t: self.city_result.setText(""))
+
+        lay.addSpacing(6)
+        lay.addWidget(label("BEFORE AN EVENT", "section"))
+        self.event_alert = QComboBox()
+        for minutes, text in EVENT_ALERT_CHOICES:
+            self.event_alert.addItem(text, minutes)
+        self.event_alert.setCurrentIndex(max(0, self.event_alert.findData(
+            int(getattr(self.settings, "event_alert_minutes", 0) or 0))))
+        lay.addWidget(self.event_alert)
+        lay.addWidget(label("Off by default. Connect Google Calendar on the Keys tab.", "hint"))
         lay.addStretch(1)
         return page
 
@@ -182,12 +212,25 @@ class SettingsDialog(QDialog):
                              self.services, KEY_PAGES["groq"])
         self.gemini = KeyField("gemini", "Gemini", "Seeing the screen.",
                                self.services, KEY_PAGES["gemini"])
-        for field in (self.groq, self.gemini):
+        self.calendar_field = KeyField(
+            "calendar", "Google Calendar (optional)",
+            "Read-only. In Google Calendar: Settings, your calendar, Integrate calendar, "
+            "'Secret address in iCal format'.",
+            self.services, GOOGLE_ICAL_HELP, link_text="Where to find it ↗",
+            placeholder="Paste the secret iCal address",
+        )
+        for field in (self.groq, self.gemini, self.calendar_field):
             key, source = self.services.existing_key(field.provider)
             field.prefill(key, source)
             lay.addWidget(field)
+        if self.calendar is not None:
+            status = self.calendar.feed_status()
+            if self.calendar_field.key and status == "No Google Calendar connected.":
+                status = "Waiting for the first update, which runs in the background."
+            self.calendar_status = label(status, "hint")
+            lay.addWidget(self.calendar_status)
         lay.addWidget(label(
-            "A changed key is tested before it is saved. Keys live in Windows Credential Manager.",
+            "A changed key or address is tested before it is saved. They live in Windows Credential Manager.",
             "hint"))
         lay.addStretch(1)
         return page
@@ -292,13 +335,18 @@ class SettingsDialog(QDialog):
             return
 
         changed_keys = [f for f in (self.groq, self.gemini) if f.changed and f.key]
+        calendar_changed = self.calendar_field.changed
+        if calendar_changed and self.calendar_field.key:
+            changed_keys.append(self.calendar_field)
         unverified = [f for f in changed_keys if not f.verified]
         if unverified:
-            names = " and ".join(f.provider.capitalize() for f in unverified)
-            self._fail(f"Test the new {names} key before saving.", 1)
+            names = " and ".join(
+                "Google Calendar address" if f.provider == "calendar" else f"{f.provider.capitalize()} key"
+                for f in unverified)
+            self._fail(f"Test the new {names} before saving.", self.tabs.indexOf(self.groq.parentWidget()))
             return
         if not any(f.key for f in (self.groq, self.gemini)):
-            self._fail("Bantu needs at least one key.", 1)
+            self._fail("Bantu needs at least one key.", self.tabs.indexOf(self.groq.parentWidget()))
             return
 
         s = self.settings
@@ -312,6 +360,7 @@ class SettingsDialog(QDialog):
         update("username", self.name.text().strip())
         update("tone", self.tone.currentData())
         update("weather_city", " ".join(self.city.text().split()))
+        update("event_alert_minutes", self.event_alert.currentData())
         update("voice_gender", self.voice.gender)
         update("voice_enabled", self.speak_replies.isChecked())
         update("mic_device", self.mic.device)
@@ -319,7 +368,12 @@ class SettingsDialog(QDialog):
 
         for field in changed_keys:
             self.services.store_key(field.provider, field.key)
-            changes.add("keys")
+            changes.add("calendar" if field.provider == "calendar" else "keys")
+        if calendar_changed and not self.calendar_field.key:
+            # Cleared: disconnect. The next sync removes the copied events.
+            if self.services.forget_key is not None:
+                self.services.forget_key("calendar")
+            changes.add("calendar")
 
         s.save()
         self.error.setText("")

@@ -271,8 +271,13 @@ dlg.applied.connect(emitted.append)
 check("current values are shown", dlg.name.text() == "Asha" and dlg.voice.gender == "male"
       and dlg.hotkey.text() == "ctrl+alt+space")
 check("a saved key is not re-checked just by opening Settings", fakes5.checked == [], fakes5.checked)
+def tab(dialog, name):
+    """By name, not position: R3 added a "Your day" tab and moved the others along."""
+    return next(i for i in range(dialog.tabs.count()) if dialog.tabs.tabText(i) == name)
+
+
 check("the About tab shows where data lives", os.environ["APPDATA"] in
-      " ".join(w.text() for w in dlg.tabs.widget(2).findChildren(type(dlg.error))))
+      " ".join(w.text() for w in dlg.tabs.widget(tab(dlg, "About")).findChildren(type(dlg.error))))
 check("...and the connection status", "3 request(s)" in dlg.status_text.text())
 
 dlg.hotkey.setText("a")
@@ -297,7 +302,7 @@ dlg2.gemini.edit.setText("good-new-gemini")
 dlg2.save()
 check("a changed key must be tested before saving", "Test the new Gemini key" in dlg2.error.text() and not out,
       dlg2.error.text())
-check("...on the Keys tab", dlg2.tabs.currentIndex() == 1)
+check("...on the Keys tab", dlg2.tabs.currentIndex() == tab(dlg2, "Keys"))
 dlg2.gemini.test()
 pump_until(lambda: dlg2.gemini.verified)
 dlg2.save()

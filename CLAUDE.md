@@ -59,7 +59,7 @@ plan to Bantu's constraints; he approved all four blocks). In order:
 |---|---|---|
 | R1 | Readiness polish | **done** — faster speech instead of streaming, long chats fit Groq, past chats, new-chat button |
 | R2 | Memory + tasks | **done** — structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
-| R3 | Daily briefing + calendar | **personality, weather and briefing done** (calendar next); briefing **only when asked** and weather for a city set in Settings (Harsh, 2026-09-17); spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
+| R3 | Daily briefing + calendar | **done** (calendar tools still need a live model run: `stress_real.py --only=calendar_add,calendar_list`, quotas were spent); briefing **only when asked** and weather for a city set in Settings (Harsh, 2026-09-17); spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
 | R4 | Meeting notes | explicit start/stop with a visible indicator; chunked Groq Whisper transcript; summary, decisions, action items into memory; **transcript-only by default** (audio deleted), retention and delete controls; summaries state what was said with times, never judgments about people |
 | R5 | Trust layer + wake word | Windows Hello (`UserConsentVerifier`) for chosen sensitive actions; Activity view in Settings; retention settings; wake-word spike on Windows' built-in offline recognizer, falling back to a ~2MB custom openWakeWord model |
 
@@ -97,6 +97,7 @@ core/                   PORTABLE — no desktop imports allowed
   activity.py           local log of approvals, refusals, blocks and failures
   weather.py            Open-Meteo forecasts (no key)
   briefing.py           "brief me": date, weather, calendar, reminders, due and overdue
+  events.py             calendar: Bantu's own events + Google Calendar read-only (not calendar.py: stdlib name)
   config.py             settings; keys via keyring
   providers/            base.py, gemini.py, groq.py, router.py
   tools/registry.py     @tool decorator -> JSON schema from type hints
@@ -120,7 +121,7 @@ Run it:
 
 Only one instance runs at a time (a `QLockFile` in `%APPDATA%\BantuAI`).
 
-**67 tools**, but **only the core group is sent up front** — see "Tools on demand". `/tools` lists
+**70 tools**, but **only the core group is sent up front** — see "Tools on demand". `/tools` lists
 all of them with their tier:
 - **core** (5, portable): `get_datetime`, `remember`, `recall`, `forget`, `search_history`
 - **screen** (3): `read_screen`, `find_on_screen` (Windows OCR), `look_at_screen` (Gemini vision)
@@ -140,6 +141,8 @@ all of them with their tier:
   `delete_note` confirms. See "Structured memory".
 - **knowledge** (2, portable, `core/knowledge.py`): `search_knowledge`, `list_knowledge`, both AUTO.
 - **weather** (1, portable, `core/weather.py`): `get_weather`, AUTO. **core** also has `daily_briefing`.
+- **calendar** (3, portable, `core/events.py`): `add_event`, `list_events`, `cancel_event`, all AUTO
+  (Bantu's own local events, like reminders).
 
 Reminders (`set_reminder`, `list_reminders`, `cancel_reminder`) live in `core/reminders.py`:
 a daemon thread polls SQLite, so they survive a restart. `parse_when` accepts ISO 8601 or
@@ -443,6 +446,33 @@ still answered in romanized Nepali.
 models' 200K tokens and every Gemini model - and Bantu said "Every provider is out of quota right now".
 Plan heavy live testing accordingly: a full `stress_real.py` pass costs ~130K tokens.
 
+## Calendar (R3, 2026-09-17)
+
+`core/events.py`: Bantu's own events (add, list, cancel) plus the user's **Google Calendar, read-only,
+through its "Secret address in iCal format"** - no sign-in, no OAuth app, no server. That address grants
+read access, so it is stored like a key (Credential Manager, Keys tab, tested before saving; clearing it
+disconnects). The feed is polled every 15 minutes into a rolling window (yesterday to +60 days) that is
+replaced wholesale; a failed update keeps the last good copy and shows why. Feed events cannot be
+cancelled here. `icalendar` + `recurring-ical-events` expand recurrence (with `python-dateutil`,
+`tzdata`, `x-wr-timezone`: ~6.5MB, within the download rule; `tzdata` is needed for time zones on
+Windows). Verified live: Google's public "Holidays in Nepal" feed (88KB, 0.7s, 14 events); weekly
+RRULE with an EXDATE, UTC to Nepal time, DURATION and all-day events expand correctly. A refused private
+address reads "The calendar address was refused - it may have been reset in Google Calendar."
+
+Today's events go into the briefing. **Alerts before an event are off by default** (Harsh chose no
+unprompted briefing); "Your day" in Settings can set 5-30 minutes, and the reminder scheduler announces
+each timed event once. The module is `events.py`, not `calendar.py`, which would shadow the stdlib
+module of that name. Settings gained a **"Your day"** tab (weather city, event alerts): on General,
+seven sections crushed every input into a clipped line.
+
+**A PyQt trap found in tests, now handled:** `test_phase7.py` crashed natively (exit 127, no traceback,
+all buffered output lost) in 5 of 6 runs once R3c added one attribute to `BantuApp` - but only with
+stdout redirected to a file. Cause: each `hud, ran = make(...)` rebinding let Python destroy the previous
+HUD's Qt objects mid-run in arbitrary order. Keeping every HUD alive until the end: 12 of 12 clean. The
+real app is unaffected (one HUD per process): launched and quit 3 times, exit 0 each. **Tests that
+build several HUDs must keep references to all of them.** Also: Settings tests now find tabs by name,
+since adding a tab shifts indexes.
+
 ## The stack — all verified working on this machine
 
 | Layer | Choice | Notes |
@@ -510,8 +540,10 @@ Tests:
 - `tests/test_r2_activity.py` — 25 checks, no API key: every outcome the registry logs and what it does
   not, argument truncation, pruning, a broken log not blocking actions, a decline through the agent, and
   the Settings Activity tab.
-- `tests/test_r3_briefing.py` — no API key: tones in the prompt, fallback, persistence, greeting by
-  hour, the HUD greeting, and Settings applying a tone. (Grows with the briefing and calendar.)
+- `tests/test_r3_briefing.py` — 117 checks, no API key, weather and feeds faked: tones, greeting, reply
+  language hint, weather (parsing, caching, unknown and Devanagari cities, outages), the briefing and
+  its failing sections, the calendar store, Google feed parsing and sync, event alerts, calendar tools,
+  and the Settings fields.
 - `tests/test_readiness.py` — no API key: one section per stress-test finding that has been
   fixed, checked against the pre-fix behaviour (the decline tests fail 12 of 33 on the old code).
 - `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15

@@ -78,6 +78,8 @@ class Services:
     open_url: Callable[[str], None] = webbrowser.open
     #: City name -> a readable place ("Kathmandu, Bagmati Province, Nepal"); raises if not found.
     find_place: Callable[[str], str] | None = None
+    #: Remove a stored secret, e.g. a disconnected calendar address.
+    forget_key: Callable[[str], None] | None = None
 
 
 def real_services() -> Services:
@@ -106,7 +108,17 @@ def real_services() -> Services:
 
         return Weather().find_place(city).label
 
-    return Services(check_key, cfg.set_key, existing, devices, preview, find_place=find_place)
+    def check(provider: str, key: str):
+        if provider == "calendar":
+            from core.events import check_feed
+            from core.providers.validate import KeyCheck
+
+            ok, message = check_feed(key)
+            return KeyCheck(ok, message)
+        return check_key(provider, key)
+
+    return Services(check, cfg.set_key, existing, devices, preview, find_place=find_place,
+                    forget_key=cfg.delete_key)
 
 
 class _Relay(QObject):
@@ -178,7 +190,8 @@ class KeyField(QWidget):
     verified_changed = pyqtSignal(bool)
 
     def __init__(self, provider: str, title: str, purpose: str, services: Services,
-                 key_page: str, required_note: str = ""):
+                 key_page: str, required_note: str = "", link_text: str = "Get a free key ↗",
+                 placeholder: str = "Paste your key here"):
         super().__init__()
         self.provider = provider
         self.services = services
@@ -195,7 +208,7 @@ class KeyField(QWidget):
         if required_note:
             head.addWidget(label(required_note, "hint", wrap=False))
         head.addStretch(1)
-        get = QPushButton("Get a free key ↗")
+        get = QPushButton(link_text)
         get.setObjectName("link")
         get.setCursor(Qt.PointingHandCursor)
         get.clicked.connect(lambda: services.open_url(key_page))
@@ -207,7 +220,7 @@ class KeyField(QWidget):
         row.setSpacing(6)
         self.edit = QLineEdit()
         self.edit.setEchoMode(QLineEdit.Password)
-        self.edit.setPlaceholderText("Paste your key here")
+        self.edit.setPlaceholderText(placeholder)
         self.edit.textChanged.connect(self._edited)
         self.edit.returnPressed.connect(self.test)
         row.addWidget(self.edit, 1)

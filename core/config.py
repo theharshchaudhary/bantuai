@@ -121,6 +121,9 @@ class Settings:
     knowledge_dir: str = ""
     #: City for weather in the briefing, in Latin letters. Empty means no weather.
     weather_city: str = ""
+    #: Announce a timed event this many minutes before it starts. 0 (the default) never
+    #: does: Harsh chose a briefing only when asked, so nothing speaks up uninvited.
+    event_alert_minutes: int = 0
 
     # --- setup --------------------------------------------------------------
     #: False until first-run setup completes. Keys found in .env do not count:

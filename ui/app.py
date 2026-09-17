@@ -165,11 +165,13 @@ class BantuApp(QObject):
         services: Any = None,
         knowledge: Any = None,
         activity: Any = None,
+        calendar: Any = None,
     ):
         super().__init__()
         self.services = services
         self.knowledge = knowledge
         self.activity = activity
+        self.calendar = calendar
         self._hotkey_enabled = install_hotkey
         self._settings_dialog = None
         self.agent = agent
@@ -561,6 +563,7 @@ class BantuApp(QObject):
             self.connection_status,
             knowledge=self.knowledge,
             activity=self.activity,
+            calendar=self.calendar,
         )
         dialog.applied.connect(self.apply_settings)
         self._settings_dialog = dialog
@@ -603,6 +606,16 @@ class BantuApp(QObject):
             self.worker.listener._threshold = None  # recalibrate for the new microphone
         if "voice_enabled" in changes and not self.settings.voice_enabled and self.speaker:
             self.speaker.stop()
+        if "calendar" in changes and self.calendar is not None:
+            from core import config as cfg
+
+            def refresh() -> None:
+                try:
+                    self.calendar.sync_feed(cfg.get_key("calendar"))
+                except Exception as e:  # the status line in Settings shows why
+                    log.warning("calendar refresh failed: %s", e)
+
+            threading.Thread(target=refresh, name="bantu-calendar-refresh", daemon=True).start()
         if changes:
             self.panel.set_status("settings saved")
 

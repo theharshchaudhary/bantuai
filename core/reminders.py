@@ -16,6 +16,7 @@ import threading
 import time
 from typing import Callable
 
+from .events import Calendar
 from .memory import Memory
 from .records import Records, when_label
 
@@ -95,9 +96,13 @@ class ReminderScheduler:
         notify: NotifyFn,
         tick: int = TICK_SECONDS,
         records: Records | None = None,
+        calendar: Calendar | None = None,
+        alert_minutes: Callable[[], int] = lambda: 0,
     ):
         self.memory = memory
         self.records = records
+        self.calendar = calendar
+        self.alert_minutes = alert_minutes
         self.notify = notify
         self.tick = max(1, tick)
         self._stop = threading.Event()
@@ -135,6 +140,16 @@ class ReminderScheduler:
                 log.exception("could not announce overdue record %s", item.id)
             # Once only: a follow-up repeated every 20 seconds is nagging, not help.
             self.records.mark_followed_up(item.id)
+            fired += 1
+        for event in self.calendar.due_alerts(int(self.alert_minutes() or 0)) if self.calendar else []:
+            minutes = max(1, round((event.starts_at - time.time()) / 60))
+            where = f", {event.location}" if event.location else ""
+            try:
+                self.notify("Coming up", f"{event.title} at "
+                            f"{datetime.datetime.fromtimestamp(event.starts_at):%H:%M}{where} (in {minutes} min)")
+            except Exception:
+                log.exception("could not announce event %s", event.id)
+            self.calendar.mark_alerted(event)
             fired += 1
         return fired
 

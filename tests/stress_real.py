@@ -374,16 +374,28 @@ TASKS = [
                 and says(r, "pokhara") and bool(re.search(r"\d+\s*°|\d+\s*degrees", r.reply)),
                 "looks up Pokhara, not the home city, and gives temperatures")),
 
+    # --- R3: calendar (Bantu's own events; the Google feed is tested without a model). ---
+    ("calendar_add", "Put a call with Ram on my calendar for next Monday at 3pm.",
+     lambda r: (any(e.title and "ram" in e.title.lower()
+                    and datetime.datetime.fromtimestamp(e.starts_at) == datetime.datetime.combine(
+                        next_weekday(0, skip_today=True), datetime.time(15))
+                    for e in main._CALENDAR.between(0, 10**11)),
+                f"an event with Ram at 15:00 on {next_weekday(0, skip_today=True)}")),
+
+    ("calendar_list", "What's on my calendar next Monday?",
+     lambda r: (called(r, "list_events") and says(r, "ram"), "lists the call with Ram")),
+
     ("open_commitments", "What are my outstanding commitments?",
      lambda r: (says(r, "बजट", "budget", "सीता", "sita") and not says(r, "vendor report"),
                 "lists the open Sita promise, not the finished Ram one")),
 ]
 
 
-def next_weekday(weekday: int) -> datetime.date:
-    """The coming date with this weekday (Mon=0), today counting if it matches."""
+def next_weekday(weekday: int, skip_today: bool = False) -> datetime.date:
+    """The coming date with this weekday (Mon=0). Today counts unless skip_today."""
     today = datetime.date.today()
-    return today + datetime.timedelta(days=(weekday - today.weekday()) % 7)
+    ahead = (weekday - today.weekday()) % 7
+    return today + datetime.timedelta(days=ahead or (7 if skip_today else 0))
 
 
 RECORDS = Records(agent.memory.db)
@@ -450,6 +462,8 @@ def main_run() -> None:
         pass
     if main._KNOWLEDGE is not None:
         main._KNOWLEDGE.stop_polling()  # it shares the database connection closed next
+    if main._CALENDAR is not None:
+        main._CALENDAR.stop_polling()
     agent.memory.close()
     shutil.rmtree(SANDBOX, ignore_errors=True)
     shutil.rmtree(TEMP_APPDATA, ignore_errors=True)

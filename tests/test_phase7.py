@@ -119,7 +119,14 @@ def make(script):
     agent = Agent(ProviderRouter([Scripted(script)]), reg,
                   Memory(Path(tempfile.mkdtemp()) / "h.db"), S())
     hud = BantuApp(agent, S(), install_hotkey=False, show_tray=False)
+    # Kept alive to the end. Rebinding `hud` let Python destroy the previous HUD's
+    # Qt objects mid-run in whatever order it liked, and about one run in two then
+    # died natively (exit 127, no traceback) once stdout was redirected to a file.
+    _HUDS.append(hud)
     return hud, ran
+
+
+_HUDS: list = []
 
 
 def kinds(hud):
