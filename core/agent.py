@@ -16,7 +16,6 @@ from .memory import Memory
 from .providers.base import (
     AllProvidersFailed,
     Image,
-    LLMResponse,
     Message,
     ProviderError,
     ToolCall,
@@ -34,7 +33,12 @@ the thing over describing how to do it. Chain several tools when a request needs
 it, and check your work — if a tool returns something unexpected, investigate
 rather than assuming it worked.
 
-Reply in whatever language {user} used. You speak English, Hindi and Nepali.
+Reply in the language and script of {user}'s latest message. You speak English,
+Hindi and Nepali; if they write Hindi or Nepali in Latin letters, reply the same way.
+
+Before saying what a file, document or web page contains, open and read it. Never
+work out contents from names, sizes or search snippets. Prefer the dedicated tools
+for files, apps, the system and the web over run_powershell whenever one fits.
 
 Be concise. No preamble, no restating the question, no offers of further help
 unless they are genuinely useful. When a tool fails, say plainly what failed and
@@ -54,6 +58,14 @@ latest message, say what you did not do because they said no. Do not blame a
 policy or an error, and do not offer another way to do it."""
 
 SKIPPED_AFTER_DECLINE = "Not run: the user said no to an earlier step of this request."
+
+# Appended to the system prompt for the one reply written when the steps run out.
+AFTER_TURN_CAP = """
+
+You have used every step allowed for this request and no tools are available.
+In two or three short sentences, written in the same language as {user}'s latest
+message, say that you stopped before finishing, what you did get done, and what is
+left. Say they can ask you to continue."""
 
 
 # --- events -----------------------------------------------------------------
@@ -125,7 +137,8 @@ class Agent:
         if getattr(self.registry, "lazy", False):
             prompt += (
                 "\n\nYou start with only a few tools. When a task needs more - files, apps, "
-                "the web, the screen - call load_tools first, loading every group you need at once."
+                "the web, the screen - call load_tools first, loading every group you need at once. "
+                "Check its list before saying you cannot do something."
             )
         return prompt
 
@@ -142,7 +155,7 @@ class Agent:
         temp = float(getattr(self.settings, "temperature", 0.7))
 
         total_calls = 0
-        last: LLMResponse | None = None
+        ran: list[str] = []
         recoveries = 0
 
         for turn in range(max_turns):
@@ -187,7 +200,6 @@ class Agent:
                 self._emit("error", text=str(e))
                 return AgentResult(f"Something went wrong: {e}", turn, total_calls, stopped_early=True)
 
-            last = resp
             self.memory.append(Message.assistant(resp.text or None, resp.tool_calls))
 
             if not resp.wants_tools:
@@ -202,25 +214,24 @@ class Agent:
                     self.memory.append(Message.tool_result(call, SKIPPED_AFTER_DECLINE))
                     continue
                 total_calls += 1
+                ran.append(call.name)
                 self._run_one(call)
 
             if self._declined:
                 return self._finish_after_decline(system, temp, budget, turn + 1, total_calls)
 
-        # Ran out of turns. Say so rather than pretending the task finished.
-        note = (
-            f"I stopped after {max_turns} tool steps without finishing. "
-            f"Here is where I got to: {(last.text or '').strip() if last else '(nothing)'}"
+        # Ran out of turns. Say so rather than pretending the task finished. The
+        # last response held only tool calls, so it has no words to show: ask for
+        # a summary, with no tools, so it cannot become a thirteenth step.
+        done = ", ".join(dict.fromkeys(ran)) or "nothing"
+        text, provider, model = self._closing_reply(
+            system + AFTER_TURN_CAP.format(user=self._user),
+            fallback=f"I stopped after {max_turns} steps without finishing. So far I ran: {done}.",
+            temp=temp,
+            budget=budget,
         )
-        self._emit("error", text=note)
-        return AgentResult(
-            note,
-            max_turns,
-            total_calls,
-            last.provider if last else "",
-            last.model if last else "",
-            stopped_early=True,
-        )
+        self._emit("error", text=text)
+        return AgentResult(text, max_turns, total_calls, provider, model, stopped_early=True)
 
     def _waiting(self, provider: str, seconds: float) -> None:
         self._emit("waiting", text=f"{provider} free limit", seconds=seconds)
@@ -260,25 +271,38 @@ class Agent:
         with, whatever the model decides.
         """
         declined = ", ".join(dict.fromkeys(self._declined))
+        text, provider, model = self._closing_reply(
+            system + AFTER_DECLINE.format(user=self._user),
+            fallback=f"Okay, I didn't run {declined}.",
+            temp=temp,
+            budget=budget,
+        )
+        self._emit("text", text=text)
+        return AgentResult(text, turns + 1, calls, provider, model)
+
+    def _closing_reply(self, system: str, fallback: str, temp: float, budget: int) -> tuple[str, str, str]:
+        """One last reply with no tools offered, stored in history.
+
+        Returns (text, provider, model). A tool call made anyway is ignored: it
+        could not be answered, and storing it without a result would break the
+        next request. Any provider failure falls back to `fallback`.
+        """
         text, provider, model = "", "", ""
         try:
             resp = self.router.chat(
                 self.memory.history(),
                 tools=None,
-                system=system + AFTER_DECLINE.format(user=self._user),
+                system=system,
                 temperature=temp,
                 max_output_tokens=budget,
                 on_wait=self._waiting,
             )
-            # A call made anyway is ignored: it could not be answered, and
-            # storing it without a result would break the next request.
             text, provider, model = (resp.text or "").strip(), resp.provider, resp.model
         except ProviderError as e:
-            log.warning("closing reply after a decline failed: %s", e)
-        text = text or f"Okay, I didn't run {declined}."
+            log.warning("closing reply failed: %s", e)
+        text = text or fallback
         self.memory.append(Message.assistant(text))
-        self._emit("text", text=text)
-        return AgentResult(text, turns + 1, calls, provider, model)
+        return text, provider, model
 
     @staticmethod
     def _explain(e: AllProvidersFailed) -> str:

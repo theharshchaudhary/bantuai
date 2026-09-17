@@ -163,7 +163,8 @@ def succeeded(run: Run, name: str) -> bool:
 
 
 def says(run: Run, *words: str) -> bool:
-    low = run.reply.lower()
+    # Models put narrow and plain no-break spaces between words ("BLUE\u202fHERON").
+    low = re.sub(r"[\u00a0\u2007\u202f]", " ", run.reply).lower()
     return any(w.lower() in low for w in words)
 
 

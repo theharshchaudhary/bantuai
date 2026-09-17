@@ -55,7 +55,7 @@ def _win():
 
 
 def register(reg: ToolRegistry) -> None:
-    reg.describe_category("system", "open, close and switch apps and windows; volume and media keys; clipboard; notifications; screenshots; system info; lock, sleep, shutdown")
+    reg.describe_category("system", "open, close and switch apps and windows; volume and media keys; clipboard; notifications; screenshots; battery, CPU, memory, disk and uptime; lock, sleep, restart, shut down")
 
     # --- apps ---------------------------------------------------------------
 

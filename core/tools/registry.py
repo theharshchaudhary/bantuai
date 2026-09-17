@@ -155,7 +155,10 @@ class ToolRegistry:
     #: Measured: all 59 schemas cost ~3,750 input tokens per request against
     #: Groq's 8,000 tokens/minute free cap - about two agent turns a minute.
     base_categories: set[str] | None = None
-    keep_for_tasks: int = 3
+    #: A group used in one request stays loaded for the next, for follow-ups such as
+    #: "now move it", then goes. The stress test saw groups left from earlier requests
+    #: add ~2,400 tokens to every request and tempt the model into unneeded steps.
+    keep_for_tasks: int = 1
     _summaries: dict[str, str] = field(default_factory=dict)
     _loaded: dict[str, int] = field(default_factory=dict)
     _task_no: int = 0
@@ -190,7 +193,7 @@ class ToolRegistry:
 
     # --- categories and lazy loading ------------------------------------
 
-    def enable_lazy_loading(self, base: set[str], keep_for_tasks: int = 3) -> None:
+    def enable_lazy_loading(self, base: set[str], keep_for_tasks: int = 1) -> None:
         """Send only `base` categories up front; the rest load on demand."""
         self.base_categories = set(base)
         self.keep_for_tasks = max(1, keep_for_tasks)

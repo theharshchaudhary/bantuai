@@ -200,6 +200,27 @@ marked as they land, each pinned by `tests/test_readiness.py`.
    was still loaded) and cost an extra ~20s turn; it then replied in English. "Look at my screen and
    describe it" used OCR text, not vision: defensible given the vision budget, but the description
    was a guess from words.
+
+   **3-5 fixed.** The system prompt now says to open and read a file, document or page before saying
+   what it contains, never inferring from names, sizes or snippets; to prefer dedicated tools over
+   `run_powershell`; and to reply in the language *and script* of the latest message (romanized
+   Nepali gets romanized Nepali). The turn cap asks for a summary with no tools offered (what got
+   done, what is left, ask to continue), sharing `_closing_reply` with the decline path; its
+   fallback names the cap and the tools that ran. Tool groups now expire after **one** unused
+   request (`keep_for_tasks=1`), so a group stays for a follow-up and then goes.
+   Catalog lines matter most for the weaker fallback models, which see nothing else before loading:
+   `gpt-oss-20b` said it had "no way to shut down the computer" without loading anything, and qwen
+   used PowerShell for battery because the system line said only "system info". The system line
+   now lists battery, CPU, memory, disk and uptime, and restart/shut down; the shell line says
+   "only when no other group has a tool"; the load hint says to check the list before saying it
+   cannot do something. Re-run twice on 20b/qwen: shutdown, battery, romanized Nepali all pass.
+
+**Second full run, 2026-09-17 afternoon: 24/27 in 6.6 min** (baseline 22/26 in 14.4 min). Median turn
+3.3s (was 10.8s). `gpt-oss-120b` had spent its day, so 59 of 67 turns ran on `gpt-oss-20b` and qwen.
+Now correct: invoice total read from both files (12,000 NPR), the Cricket World Cup answered after
+searching *and reading a page*, "look at my screen" used vision and described it accurately. The
+three failures (read_docx grader missing a U+202F space, shutdown, romanized battery) were fixed
+above. Sustained back-to-back use still waits: 22 turns over 8s, all visible countdowns.
 6. **Once `gpt-oss-120b` runs out, no tool task can finish** (found re-testing fix 1). Two bugs:
    - The Groq adapter never tries its other models. Groq's published free limits are **per model**:
      30 req/min, 1,000 req/day, 8K tok/min and **200K tok/day** each for `gpt-oss-120b`,

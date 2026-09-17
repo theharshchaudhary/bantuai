@@ -667,6 +667,82 @@ check("quitting mid-wait does not hang", _time.monotonic() - t0 < 2.0, f"{_time.
 check("...the worker thread stopped", not hud.agent_thread.isRunning())
 
 
+
+# --- running out of steps ends with a real summary ---------------------------
+# Found live: "I stopped after 12 tool steps without finishing. Here is where I
+# got to: " followed by nothing, because the last response held only tool calls.
+
+print("\n[running out of steps ends with a real summary]")
+loop = [LLMResponse(text="", tool_calls=[call(i, "peek", what=f"step{i}")]) for i in range(6)]
+agent, prov, ran, events, asked = make(
+    loop + [LLMResponse(text="I stopped before finishing: I checked six things, the report is still left.")],
+    confirm=no,
+)
+res = agent.run("check everything")
+check("the cap still stops the loop", len(ran) == 6 and res.stopped_early, str(len(ran)))
+check("the summary is offered no tools, so it cannot be a seventh step", prov.requests[-1][0] is None)
+check("the summary prompt asks what was done and what is left",
+      "what you did get done" in prov.requests[-1][1] and "what is" in prov.requests[-1][1])
+check("the model's summary is the reply", res.text.startswith("I stopped before finishing"), res.text)
+check("it is shown as unfinished", events[-1].kind == "error" and events[-1].text == res.text)
+check("history has no unanswered tool calls", orphans(agent.memory) == [])
+
+agent, prov, ran, events, asked = make(
+    loop + [LLMResponse(text="", tool_calls=[call(99, "peek", what="one more")])], confirm=no)
+res = agent.run("check everything")
+check("a step attempted in the summary is not run", "peek one more" not in ran, str(ran))
+check("...and the fallback names the cap and what ran",
+      "stopped after 6 steps" in res.text and "peek" in res.text, res.text)
+check("...without leaving an unanswered call", orphans(agent.memory) == [])
+
+agent, prov, ran, events, asked = make(loop, confirm=no, fail_on={7})
+res = agent.run("check everything")
+check("a provider failure on the summary still gives an honest reply",
+      "stopped after 6 steps" in res.text and res.stopped_early, res.text)
+
+print("\n[the prompt asks for reading, dedicated tools, and the user's own script]")
+flat = " ".join(SYSTEM_TEMPLATE.split())
+# Found live: asked the combined total of two invoices, it listed the folder and
+# answered "98 bytes" without opening either file.
+check("read before saying what something contains", "open and read it" in flat and "names, sizes" in flat)
+# Found live: qwen reached for run_powershell to list files, then the decline ended the task.
+check("prefer dedicated tools over PowerShell", "over run_powershell" in flat)
+# Found live: a battery question in romanized Nepali was answered in English.
+check("reply in Latin letters when they write Hindi or Nepali that way", "Latin letters" in flat)
+check("language follows the latest message, not the user's name", "latest message" in flat)
+
+print("\n[tool groups left from earlier requests expire after one]")
+reg = ToolRegistry()
+
+
+@reg.register(tier=Tier.AUTO, category="core")
+def now() -> str:
+    """The time."""
+    return "noon"
+
+
+@reg.register(tier=Tier.AUTO, category="files")
+def list_directory(path: str) -> str:
+    """List a folder.
+
+    Args:
+        path: Folder.
+    """
+    return path
+
+
+reg.enable_lazy_loading(base={"core"})
+reg.new_task()
+reg.load(["files"])
+reg.new_task()
+check("a group stays for the next request, for follow-ups", "list_directory" in [s.name for s in reg.specs()])
+reg.new_task()
+check("...and is gone the request after", "list_directory" not in [s.name for s in reg.specs()])
+main_src = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+check("the app uses that default rather than overriding it",
+      'enable_lazy_loading(base={"core"})' in main_src and "keep_for_tasks" not in main_src)
+
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 for f in FAIL:
     print("  FAILED:", f)
