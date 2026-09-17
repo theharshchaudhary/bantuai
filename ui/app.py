@@ -155,10 +155,12 @@ class BantuApp(QObject):
         show_tray: bool = True,
         services: Any = None,
         knowledge: Any = None,
+        activity: Any = None,
     ):
         super().__init__()
         self.services = services
         self.knowledge = knowledge
+        self.activity = activity
         self._hotkey_enabled = install_hotkey
         self._settings_dialog = None
         self.agent = agent
@@ -549,6 +551,7 @@ class BantuApp(QObject):
             str(cfg.user_data_dir()),
             self.connection_status,
             knowledge=self.knowledge,
+            activity=self.activity,
         )
         dialog.applied.connect(self.apply_settings)
         self._settings_dialog = dialog

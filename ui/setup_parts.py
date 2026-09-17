@@ -57,7 +57,7 @@ QCheckBox, QRadioButton {{ color:{INK}; font-size:13px; spacing:8px; }}
 QTabWidget::pane {{ border:1px solid {RULE}; border-radius:8px; top:-1px; }}
 QTabBar::tab {{
     background:transparent; color:{INK_SOFT}; padding:8px 16px; border:none;
-    border-bottom:2px solid transparent; font-size:13px;
+    border-bottom:2px solid transparent;
 }}
 QTabBar::tab:selected {{ color:{INK}; border-bottom:2px solid {ACCENT}; }}
 """

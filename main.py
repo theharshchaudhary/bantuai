@@ -42,6 +42,7 @@ from core.memory import Memory
 from core.reminders import ReminderScheduler
 from core.providers.base import ProviderError
 from core.providers.router import build_router
+from core.activity import Activity
 from core.knowledge import Knowledge
 from core.knowledge import register as register_knowledge
 from core.records import Records
@@ -98,6 +99,7 @@ _LISTENER = None
 #: Extra reminder announcers. The HUD registers one; the CLI needs none.
 _ANNOUNCERS: list = []
 _KNOWLEDGE: Knowledge | None = None
+_ACTIVITY: Activity | None = None
 
 
 def knowledge_folder(settings: cfg.Settings) -> Path:
@@ -123,6 +125,14 @@ def build(settings: cfg.Settings | None = None) -> tuple[Agent, cfg.Settings]:
     builtin.register(_REGISTRY, memory)
     records = Records(memory.db)
     notes.register(_REGISTRY, records, memory)
+
+    # Every approval, refusal, block and failure is kept locally, in code, not by the model.
+    global _ACTIVITY
+    _ACTIVITY = Activity(memory.db)
+    _ACTIVITY.prune()
+    _REGISTRY.audit = lambda tool, args, outcome, result: _ACTIVITY.record(
+        tool.name, tool.tier.value, outcome, args, result
+    )
 
     global _KNOWLEDGE
     readers = {}
@@ -265,7 +275,9 @@ def run_hud() -> int:
 
     from ui.app import BantuApp
 
-    hud = BantuApp(agent, settings, listener=_LISTENER, speaker=_SPEAKER, knowledge=_KNOWLEDGE)
+    hud = BantuApp(
+        agent, settings, listener=_LISTENER, speaker=_SPEAKER, knowledge=_KNOWLEDGE, activity=_ACTIVITY
+    )
     _ANNOUNCERS.append(hud.announced.emit)
     try:
         return app.exec_()

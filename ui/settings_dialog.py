@@ -12,10 +12,11 @@ from typing import Any, Callable
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QCheckBox, QDialog, QHBoxLayout, QLineEdit, QPushButton, QTabWidget,
-    QVBoxLayout, QWidget,
+    QCheckBox, QDialog, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
+from core.activity import OUTCOMES, RETENTION_DAYS, describe_entry
 from core.providers.validate import KEY_PAGES
 
 from .setup_parts import (
@@ -35,9 +36,11 @@ class SettingsDialog(QDialog):
         status: Callable[[], str] | None = None,
         parent: QWidget | None = None,
         knowledge: Any = None,
+        activity: Any = None,
     ):
         super().__init__(parent)
         self.knowledge = knowledge
+        self.activity = activity
         self.settings = settings
         self.services = services
         self.data_dir = data_dir
@@ -50,8 +53,15 @@ class SettingsDialog(QDialog):
         root.setContentsMargins(20, 18, 20, 16)
         root.setSpacing(12)
         self.tabs = QTabWidget()
+        # Tab labels take the dialog font. A stylesheet font-size here clipped them:
+        # Qt measured each tab with one font and drew it with another.
+        tab_font = self.tabs.tabBar().font()
+        tab_font.setPixelSize(13)
+        self.tabs.tabBar().setFont(tab_font)
         self.tabs.addTab(self._general(), "General")
         self.tabs.addTab(self._keys(), "Keys")
+        if self.activity is not None:
+            self.tabs.addTab(self._activity(), "Activity")
         self.tabs.addTab(self._about(status), "About")
         root.addWidget(self.tabs, 1)
 
@@ -129,6 +139,47 @@ class SettingsDialog(QDialog):
             "hint"))
         lay.addStretch(1)
         return page
+
+    def _activity(self) -> QWidget:
+        page, lay = self._tab()
+        lay.addWidget(label("ACTIVITY", "section"))
+        lay.addWidget(label(
+            "Everything that needed your approval, was refused, or failed - recorded by the app "
+            f"itself, not by the assistant. Kept on this computer for {RETENTION_DAYS} days.", "lead"))
+        self.activity_list = QListWidget()
+        self.activity_list.setObjectName("activity")
+        self.activity_list.setStyleSheet(
+            "QListWidget#activity{background:#1B242A;color:#E6EDF0;border:1px solid #222E35;"
+            "border-radius:7px;font-size:12px;padding:4px;}"
+            "QListWidget#activity::item{padding:5px 4px;border-bottom:1px solid #222E35;}"
+            "QListWidget#activity::item:selected{background:#1D3B40;color:#E6EDF0;}"
+        )
+        # Long commands wrap rather than scroll sideways under an unstyled scrollbar.
+        self.activity_list.setWordWrap(True)
+        self.activity_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        lay.addWidget(self.activity_list, 1)
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.refresh_activity)
+        row = QHBoxLayout()
+        row.addWidget(refresh)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.refresh_activity()
+        return page
+
+    def refresh_activity(self) -> None:
+        self.activity_list.clear()
+        entries = self.activity.recent(200)
+        if not entries:
+            empty = QListWidgetItem("Nothing yet.")
+            empty.setFlags(Qt.NoItemFlags)
+            self.activity_list.addItem(empty)
+            return
+        for entry in entries:
+            item = QListWidgetItem(describe_entry(entry))
+            meaning = OUTCOMES.get(entry["outcome"], "")
+            item.setToolTip(f"{entry['outcome']}: {meaning}\n\n{entry['detail']}".strip())
+            self.activity_list.addItem(item)
 
     def _about(self, status: Callable[[], str] | None) -> QWidget:
         page, lay = self._tab()

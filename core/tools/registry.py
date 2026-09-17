@@ -139,6 +139,8 @@ def build_schema(fn: Callable) -> tuple[str, dict[str, Any]]:
 
 #: Signature of the confirmation callback: (tool, arguments) -> allowed?
 ConfirmFn = Callable[[Tool, dict[str, Any]], bool]
+#: Told about every approval, refusal and failure: (tool, arguments, outcome, result).
+AuditFn = Callable[[Tool, dict[str, Any], str, str], None]
 
 
 LOAD_TOOLS = "load_tools"
@@ -162,6 +164,8 @@ class ToolRegistry:
     _summaries: dict[str, str] = field(default_factory=dict)
     _loaded: dict[str, int] = field(default_factory=dict)
     _task_no: int = 0
+    #: Records what was approved, declined, blocked or failed. See core/activity.py.
+    audit: AuditFn | None = None
 
     def register(
         self,
@@ -312,7 +316,20 @@ class ToolRegistry:
 
         Failures come back as text rather than raising: the model should get the
         chance to recover, and a crashed assistant is worse than a corrected one.
+        Every approval, refusal and failure is reported to `audit`; successful
+        auto-tier calls are not, since they change nothing worth recording.
         """
+        tool = self.tools.get(call.name)
+        result, outcome = self._execute(call, confirm)
+        if outcome and tool is not None and self.audit is not None:
+            try:
+                self.audit(tool, call.arguments or {}, outcome, result)
+            except Exception:  # a broken log must never block or change an action
+                log.exception("activity log failed")
+        return result
+
+    def _execute(self, call: ToolCall, confirm: ConfirmFn | None) -> tuple[str, str | None]:
+        """(result for the model, outcome to log or None)."""
         if call.name == LOAD_TOOLS and self.lazy:
             loaded, unknown = self.load((call.arguments or {}).get("categories") or [])
             parts = []
@@ -321,11 +338,11 @@ class ToolRegistry:
                 parts.append(f"Loaded {', '.join(loaded)}. You can now use: {names}.")
             if unknown:
                 parts.append(f"No such group: {', '.join(unknown)}. Groups: {', '.join(sorted(self.categories()))}.")
-            return " ".join(parts) or "Nothing to load."
+            return " ".join(parts) or "Nothing to load.", None
 
         tool = self.tools.get(call.name)
         if tool is None:
-            return f"Error: no tool named {call.name!r}. Available: {', '.join(sorted(self.tools))}"
+            return f"Error: no tool named {call.name!r}. Available: {', '.join(sorted(self.tools))}", None
 
         if self.lazy:
             # Using a tool keeps its group loaded. A provider that does not
@@ -335,38 +352,41 @@ class ToolRegistry:
 
         if tool.tier is Tier.BLOCKED:
             log.warning("blocked tool refused: %s", tool.name)
-            return f"Error: {tool.name} is blocked and cannot be run."
+            return f"Error: {tool.name} is blocked and cannot be run.", "blocked"
 
+        success = None
+        if tool.tier is Tier.CONFIRM:
+            success = "allowed" if tool.name in self._session_allow else "approved"
         if tool.tier is Tier.CONFIRM and tool.name not in self._session_allow:
             if confirm is None:
                 return (
                     f"Error: {tool.name} needs confirmation but nothing can ask the user "
                     f"right now, so it was not run."
-                )
+                ), "not asked"
             declined = (
                 f"The user said no to {tool.name}, so it was not done. "
                 f"Do not try to do it another way."
             )
             try:
                 if not confirm(tool, call.arguments):
-                    return declined
+                    return declined, "declined"
             except Rejected:
-                return declined
+                return declined, "declined"
 
         try:
             bound = self._coerce(tool, call.arguments)
         except (TypeError, ValueError) as e:
-            return f"Error: bad arguments for {tool.name}: {e}"
+            return f"Error: bad arguments for {tool.name}: {e}", "failed"
 
         try:
             result = tool.fn(**bound)
         except ToolError as e:
-            return f"Error: {e}"
+            return f"Error: {e}", "failed"
         except Exception as e:  # a bug in one tool must not kill the agent
             log.exception("tool %s raised", tool.name)
-            return f"Error: {tool.name} failed: {type(e).__name__}: {e}"
+            return f"Error: {tool.name} failed: {type(e).__name__}: {e}", "failed"
 
-        return self._stringify(result)
+        return self._stringify(result), success
 
     @staticmethod
     def _coerce(tool: Tool, args: dict[str, Any]) -> dict[str, Any]:

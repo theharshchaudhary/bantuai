@@ -58,7 +58,7 @@ plan to Bantu's constraints; he approved all four blocks). In order:
 | Step | What | Notes |
 |---|---|---|
 | R1 | Readiness polish | **done** — faster speech instead of streaming, long chats fit Groq, past chats, new-chat button |
-| R2 | Memory + tasks | **records, notes tools, follow-ups, knowledge folder done** (activity log next): structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
+| R2 | Memory + tasks | **done** — structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
 | R3 | Daily briefing + calendar | spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
 | R4 | Meeting notes | explicit start/stop with a visible indicator; chunked Groq Whisper transcript; summary, decisions, action items into memory; **transcript-only by default** (audio deleted), retention and delete controls; summaries state what was said with times, never judgments about people |
 | R5 | Trust layer + wake word | Windows Hello (`UserConsentVerifier`) for chosen sensitive actions; Activity view in Settings; retention settings; wake-word spike on Windows' built-in offline recognizer, falling back to a ~2MB custom openWakeWord model |
@@ -94,6 +94,7 @@ core/                   PORTABLE — no desktop imports allowed
   memory.py             SQLite + FTS5 conversation and fact storage
   records.py            commitments, decisions, action items, tasks, notes, people
   knowledge.py          the knowledge folder: index, poll, search tools
+  activity.py           local log of approvals, refusals, blocks and failures
   config.py             settings; keys via keyring
   providers/            base.py, gemini.py, groq.py, router.py
   tools/registry.py     @tool decorator -> JSON schema from type hints
@@ -469,6 +470,9 @@ Tests:
 - `tests/test_r2_knowledge.py` — 48 checks, no API key, temp folders only: chunking, text encodings,
   sync (add/edit/delete/ignore/unreadable/oversized), Word and Excel through the real readers, polling,
   all-words-first search, tools, default folder location, and the Settings section.
+- `tests/test_r2_activity.py` — 25 checks, no API key: every outcome the registry logs and what it does
+  not, argument truncation, pruning, a broken log not blocking actions, a decline through the agent, and
+  the Settings Activity tab.
 - `tests/test_readiness.py` — no API key: one section per stress-test finding that has been
   fixed, checked against the pre-fix behaviour (the decline tests fail 12 of 33 on the old code).
 - `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15
@@ -679,6 +683,19 @@ Three tiers, enforced in the registry **before execution**:
 - **auto** — read-only or trivially reversible; runs silently
 - **confirm** — changes disk, process or website state; shows exact arguments first
 - **blocked** — never runs
+
+**Activity log** (`core/activity.py`, R2). `ToolRegistry.audit` is told about every decision the
+registry makes: `approved` (confirm-tier, user said yes), `allowed` (covered by an earlier approve-all in
+the same request), `declined`, `not asked` (nothing could ask, so it did not run), `blocked`, and `failed`
+(any tier, including safety refusals such as `.env`). Successful auto-tier calls are **not** logged:
+they change nothing, and logging them would bury what matters. It is written by the app, not the model,
+so it cannot be talked out of recording something. Argument values are cut to 160 chars (no whole file
+contents), entries are pruned after 90 days at start-up, and a failing log never blocks or changes an
+action. Settings has an Activity tab (newest first, hover explains the outcome). Live through
+`main.build()`: a declined delete and an approved write both appear, with the file left alone.
+Found on the way: Settings tab labels were clipped because the stylesheet set `font-size` on
+`QTabBar::tab` - Qt measured tabs with one font and drew them with another. The size is now set on the
+tab bar's font instead.
 
 Blocklist: credential stores (`.env`, `id_rsa`, browser profiles), registry writes, System32 and
 Program Files writes, disk formatting, Defender/firewall changes, and **Bantu's own config and keys**.
