@@ -16,8 +16,8 @@ import math
 from enum import Enum
 from pathlib import Path
 
-from PyQt5.QtCore import QPoint, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QIcon, QMovie, QPainter, QPainterPath, QPen
+from PyQt5.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QIcon, QMovie, QPainter, QPainterPath, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
@@ -174,6 +174,56 @@ class Orb(QWidget):
             self._press = None
 
 
+def glyph(kind: str, color: str = INK_SOFT, size: int = 32) -> QIcon:
+    """A plain line icon drawn in code, matching the panel rather than clip art.
+
+    kind: "new" (a plus), "history" (a clock) or "settings" (a gear).
+    """
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(color))
+    pen.setWidthF(size / 11)
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    m, c = size * 0.2, size / 2
+    if kind == "new":
+        p.drawLine(QPointF(c, m), QPointF(c, size - m))
+        p.drawLine(QPointF(m, c), QPointF(size - m, c))
+    elif kind == "history":
+        p.drawEllipse(QRectF(m, m, size - 2 * m, size - 2 * m))
+        p.drawLine(QPointF(c, c), QPointF(c, m + size * 0.14))
+        p.drawLine(QPointF(c, c), QPointF(c + size * 0.15, c + size * 0.08))
+    elif kind == "settings":
+        ring, tooth = size * 0.22, size * 0.34
+        p.drawEllipse(QPointF(c, c), ring, ring)
+        p.drawEllipse(QPointF(c, c), size * 0.07, size * 0.07)
+        pen.setWidthF(size / 8)
+        p.setPen(pen)
+        for i in range(8):
+            a = math.pi / 4 * i
+            p.drawLine(QPointF(c + math.cos(a) * ring, c + math.sin(a) * ring),
+                       QPointF(c + math.cos(a) * tooth, c + math.sin(a) * tooth))
+    p.end()
+    return QIcon(pix)
+
+
+def _head_button(tip: str, icon: QIcon) -> QPushButton:
+    b = QPushButton()
+    b.setFixedSize(22, 22)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setToolTip(tip)
+    b.setIcon(icon)
+    b.setIconSize(QSize(14, 14))
+    b.setStyleSheet(
+        f"QPushButton{{background:transparent;border:none;}}"
+        f"QPushButton:hover{{background:{SURFACE_2};border-radius:5px;}}"
+        "QPushButton:disabled{background:transparent;}"
+    )
+    return b
+
+
 def _label(text: str, css: str) -> QLabel:
     lab = QLabel(text)
     lab.setObjectName("plain")
@@ -189,9 +239,13 @@ class Bubble(QFrame):
         self.role = role
         self.setObjectName("bubble")
         mine = role == "user"
+        # The user's own messages sit indented with a tint, so a reopened chat
+        # reads as a conversation. A margin, not alignment: a word-wrapped label
+        # given alignment shrinks to its narrowest line.
         self.setStyleSheet(
-            f"QFrame#bubble{{background:{'#1D2B33' if mine else SURFACE_2};"
-            f"border:1px solid {RULE};border-radius:9px;}}"
+            f"QFrame#bubble{{background:{'#173A40' if mine else SURFACE_2};"
+            f"border:1px solid {'#1F5058' if mine else RULE};border-radius:9px;"
+            f"margin-left:{56 if mine else 0}px;margin-right:{0 if mine else 28}px;}}"
         )
         lay = QVBoxLayout(self)
         lay.setContentsMargins(11, 8, 11, 9)
@@ -297,6 +351,8 @@ class ChatPanel(QWidget):
     submitted = pyqtSignal(str)
     listen_requested = pyqtSignal()
     settings_requested = pyqtSignal()
+    new_chat_requested = pyqtSignal()
+    history_requested = pyqtSignal()
     closed = pyqtSignal()
 
     def __init__(self, hotkey_label: str = "") -> None:
@@ -324,20 +380,13 @@ class ChatPanel(QWidget):
         head.addStretch(1)
         self.status = _label("ready", f"color:{INK_SOFT};font-size:11px;")
         head.addWidget(self.status)
-        self.gear = QPushButton()
-        self.gear.setFixedSize(22, 22)
-        self.gear.setCursor(Qt.PointingHandCursor)
-        self.gear.setToolTip("Settings")
-        gear_icon = ASSETS / "Settings.png"
-        if gear_icon.exists():
-            self.gear.setIcon(QIcon(str(gear_icon)))
-            self.gear.setIconSize(QSize(14, 14))
-        else:
-            self.gear.setText("⚙")
-        self.gear.setStyleSheet(
-            f"QPushButton{{background:transparent;color:{INK_SOFT};border:none;}}"
-            f"QPushButton:hover{{background:{SURFACE_2};border-radius:5px;}}"
-        )
+        self.new_chat = _head_button("New chat", glyph("new"))
+        self.new_chat.clicked.connect(self.new_chat_requested.emit)
+        head.addWidget(self.new_chat)
+        self.history = _head_button("Earlier chats", glyph("history"))
+        self.history.clicked.connect(self.history_requested.emit)
+        head.addWidget(self.history)
+        self.gear = _head_button("Settings", glyph("settings"))
         self.gear.clicked.connect(self.settings_requested.emit)
         head.addWidget(self.gear)
         close = QPushButton("✕")
@@ -429,6 +478,12 @@ class ChatPanel(QWidget):
             if self.feed.itemAt(i).widget() is not None
         ]
 
+    def clear(self) -> None:
+        """Empty the transcript, e.g. for a new chat or before showing an earlier one."""
+        for w in self.items():
+            self.feed.removeWidget(w)
+            w.deleteLater()
+
     def add_message(self, text: str, role: str) -> Bubble:
         return self._append(Bubble(text, role))
 
@@ -444,5 +499,8 @@ class ChatPanel(QWidget):
     def set_busy(self, busy: bool) -> None:
         self.entry.setEnabled(not busy)
         self.mic.setEnabled(not busy)
+        # Switching chats mid-request would file the reply under the wrong one.
+        self.new_chat.setEnabled(not busy)
+        self.history.setEnabled(not busy)
         if not busy:
             self.entry.setFocus()

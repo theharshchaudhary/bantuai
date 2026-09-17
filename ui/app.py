@@ -9,13 +9,14 @@ has not answered never times out into a yes.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import math
 import threading
 import time
 from typing import Any
 
-from PyQt5.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, QPoint, QThread, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QAction, QApplication, QMenu, QSystemTrayIcon
 
@@ -25,6 +26,33 @@ from core.tools.registry import Tool
 from .widgets import ASSETS, ChatPanel, Orb, State
 
 log = logging.getLogger("bantu.ui")
+
+#: Opening Bantu this soon after the last message continues that chat. After a
+#: longer gap it starts fresh; the earlier chat stays one click away in History.
+RESUME_WITHIN_S = 6 * 3600
+#: How much of an earlier chat the panel shows when it is reopened.
+TRANSCRIPT_MESSAGES = 60
+
+
+def relative_time(ts: float, now: float | None = None) -> str:
+    """'just now', '5 min ago', '3 h ago', 'yesterday', or a date."""
+    now = time.time() if now is None else now
+    gap = max(0.0, now - ts)
+    if gap < 60:
+        return "just now"
+    if gap < 3600:
+        return f"{int(gap // 60)} min ago"
+    then, today = datetime.datetime.fromtimestamp(ts), datetime.datetime.fromtimestamp(now)
+    if then.date() == today.date():
+        return f"{int(gap // 3600)} h ago"
+    if (today.date() - then.date()).days == 1:
+        return "yesterday"
+    return f"{then.day} {then:%b}"
+
+
+def chat_title(text: str, limit: int = 42) -> str:
+    one_line = " ".join((text or "").split())
+    return one_line if len(one_line) <= limit else one_line[: limit - 1].rstrip() + "…"
 
 
 def hotkey_label(combo: str) -> str:
@@ -164,6 +192,9 @@ class BantuApp(QObject):
         self.panel.listen_requested.connect(self.listen)
         self.panel.closed.connect(self.panel.hide)
         self.panel.settings_requested.connect(self.open_settings)
+        self.panel.new_chat_requested.connect(self.new_chat)
+        self.panel.history_requested.connect(self.show_history)
+        self._history_menu: QMenu | None = None
         self._hotkey_pressed.connect(self.listen)
         self.announced.connect(self._on_announced)
 
@@ -193,9 +224,90 @@ class BantuApp(QObject):
             self._install_hotkey()
 
         self.orb.show()
+        if not self._resume_recent_chat():
+            self._greet(f"{settings.assistant_name} is ready.")
+
+    # --- chats --------------------------------------------------------------
+
+    def _greet(self, opening: str) -> None:
         hint = f"Press {hotkey_label(self.hotkey)} anywhere to speak, or type below." \
             if self.hotkey_installed else "Type below, or use the microphone button."
-        self.panel.add_message(f"{settings.assistant_name} is ready. {hint}", "assistant")
+        self.panel.add_message(f"{opening} {hint}", "assistant")
+
+    def _resume_recent_chat(self) -> bool:
+        """Continue the last chat if it was recent. True if one was reopened."""
+        memory = getattr(self.agent, "memory", None)
+        if memory is None:
+            return False
+        recent = memory.recent_conversations(1)
+        if not recent or time.time() - recent[0]["last"] > RESUME_WITHIN_S:
+            return False
+        if not memory.open_conversation(recent[0]["conversation"]):
+            return False
+        self._show_transcript()
+        self.panel.set_status("continuing your last chat")
+        return True
+
+    def _show_transcript(self) -> None:
+        self.panel.clear()
+        self._chips = []
+        for role, text in self.agent.memory.transcript(TRANSCRIPT_MESSAGES):
+            self.panel.add_message(text, role)
+
+    def new_chat(self) -> None:
+        """Start a fresh conversation. The current one stays in History."""
+        if self.busy:
+            return
+        if self.speaker:
+            self.speaker.stop()
+        self.agent.memory.new_conversation()
+        self.panel.clear()
+        self._chips = []
+        self._greet("New chat.")
+        self.panel.set_status("new chat")
+
+    def open_chat(self, conversation: str) -> None:
+        """Switch the panel, and the agent's context, to an earlier conversation."""
+        memory = self.agent.memory
+        if self.busy or conversation == memory.conversation:
+            return
+        if not memory.open_conversation(conversation):
+            return
+        if self.speaker:
+            self.speaker.stop()
+        self._show_transcript()
+        self.panel.set_status("earlier chat")
+
+    def history_menu(self) -> QMenu:
+        """The recent chats, newest first, with the open one ticked."""
+        memory = self.agent.memory
+        menu = QMenu(self.panel)
+        menu.setStyleSheet(
+            "QMenu{background:#141B1F;color:#E6EDF0;border:1px solid #222E35;padding:4px;}"
+            "QMenu::item{padding:6px 14px;border-radius:5px;}"
+            "QMenu::item:selected{background:#1B242A;}"
+            "QMenu::item:disabled{color:#97A5AF;}"
+        )
+        chats = memory.recent_conversations(15)
+        if not chats:
+            empty = QAction("No earlier chats yet", menu)
+            empty.setEnabled(False)
+            menu.addAction(empty)
+        for chat in chats:
+            action = QAction(f"{chat_title(chat['first_user'])}   ·   {relative_time(chat['last'])}", menu)
+            action.setCheckable(True)
+            action.setChecked(chat["conversation"] == memory.conversation)
+            action.triggered.connect(lambda _checked=False, cid=chat["conversation"]: self.open_chat(cid))
+            menu.addAction(action)
+        return menu
+
+    def show_history(self) -> None:
+        if self.busy:
+            return
+        # Kept on self: a menu with no reference is collected while still open.
+        self._history_menu = self.history_menu()
+        button = self.panel.history
+        self._history_menu.popup(button.mapToGlobal(QPoint(0, button.height() + 2)))
 
     # --- placement ----------------------------------------------------------
 

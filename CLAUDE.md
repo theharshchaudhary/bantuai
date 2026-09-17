@@ -57,7 +57,7 @@ plan to Bantu's constraints; he approved all four blocks). In order:
 
 | Step | What | Notes |
 |---|---|---|
-| R1 | Readiness polish | ~~streamed replies~~ replaced by faster speech (see below); past chats in the panel, new-chat button |
+| R1 | Readiness polish | **done** — faster speech instead of streaming, long chats fit Groq, past chats, new-chat button |
 | R2 | Memory + tasks | structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
 | R3 | Daily briefing + calendar | spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
 | R4 | Meeting notes | explicit start/stop with a visible indicator; chunked Groq Whisper transcript; summary, decisions, action items into memory; **transcript-only by default** (audio deleted), retention and delete controls; summaries state what was said with times, never judgments about people |
@@ -321,6 +321,18 @@ were elsewhere:
   Memory never trims the latest user message or anything after it. Live: a 22,580-token stored
   conversation went to Groq as 4,415- and 4,934-token requests and still recalled a codename given a
   few messages earlier.
+
+**Past chats.** Opening Bantu within `RESUME_WITHIN_S` (6h) of the last message reopens that chat and
+shows its transcript (`Memory.transcript`: user messages and replies with words, never tool
+plumbing); after a longer gap it greets and starts fresh. The panel header has **New chat** (+) and
+**Earlier chats** (clock): a menu of up to 15 chats, most recently *active* first
+(`recent_conversations` now orders by last message and skips empty conversations), titled by their
+first message with a relative time, the open one ticked. Switching changes the agent's context too,
+since it is the same `Memory.conversation`. Both buttons are disabled while a request runs -
+switching mid-request would file the reply under the wrong chat. Header icons are drawn in code
+(`widgets.glyph`) so they match the panel; the old clip-art gear was replaced. The user's own
+bubbles are indented with a teal tint so a reopened transcript reads as a conversation - via a
+stylesheet margin, because alignment makes a word-wrapped label shrink to its narrowest line.
 
 ## The stack — all verified working on this machine
 

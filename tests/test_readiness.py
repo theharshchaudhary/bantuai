@@ -946,6 +946,148 @@ check("...keeping the newest message", last == "what did we say earlier?", str(l
 check("...and as much recent history as fits, not just the question", total > MIN_HISTORY_TOKENS, str(total))
 
 
+
+# --- past chats and a new-chat button -----------------------------------------
+# Harsh's readiness list: the panel showed nothing of earlier conversations, and
+# there was no way to start a clean one.
+
+print("\n[past chats: resume, new chat, history]")
+from ui.app import RESUME_WITHIN_S, chat_title, relative_time
+from ui.widgets import Bubble, glyph
+
+NOW = 1_800_000_000.0
+check("relative times read naturally",
+      [relative_time(NOW - s, NOW) for s in (5, 300, 7200)] == ["just now", "5 min ago", "2 h ago"],
+      str([relative_time(NOW - s, NOW) for s in (5, 300, 7200)]))
+check("older chats show yesterday or a date",
+      relative_time(NOW - 86400 * 1.2, NOW) in ("yesterday", "2 h ago") and
+      relative_time(NOW - 86400 * 9, NOW).split()[1].isalpha())
+check("long first messages become short titles",
+      chat_title("please find every invoice from last year and add them up for me") ==
+      "please find every invoice from last year…" and chat_title("hi\nthere") == "hi there")
+check("the header icons draw", not glyph("new").isNull() and not glyph("history").isNull())
+
+mem = Memory(Path(tempfile.mkdtemp()) / "chats.db")
+first = mem.conversation
+mem.append(Message.user("what's on my list today?"))
+mem.append(Message.assistant("You have two reminders."))
+mem.new_conversation()
+second = mem.conversation
+tc = ToolCall("t1", "peek", {"what": "battery"})
+mem.append(Message.user("battery?"))
+mem.append(Message.assistant(None, [tc]))
+mem.append(Message.tool_result(tc, "60%"))
+mem.append(Message.assistant("60% and charging."))
+mem.db.execute("UPDATE messages SET created_at = created_at - 100 WHERE conversation=?", (second,))
+mem.db.commit()
+mem.open_conversation(first)
+mem.append(Message.user("and tomorrow?"))  # the first chat is now the most recently active
+mem.append(Message.assistant("Nothing yet."))
+mem.new_conversation()  # an empty current conversation
+
+chats = mem.recent_conversations()
+check("chats are ordered by last activity, not by when they started",
+      [c["conversation"] for c in chats] == [first, second], str([c["first_user"] for c in chats]))
+check("an empty conversation is not listed", all(c["n"] > 0 for c in chats) and len(chats) == 2)
+check("opening an unknown chat changes nothing",
+      not mem.open_conversation("nope") and mem.conversation not in (first, second))
+mem.open_conversation(second)
+check("a transcript is words only, no tool plumbing",
+      mem.transcript() == [("user", "battery?"), ("assistant", "60% and charging.")], str(mem.transcript()))
+
+
+class Recorder(LLMProvider):
+    name = "recorder"
+
+    def __init__(self):
+        self.requests = []
+
+    def available_models(self):
+        return ["r"]
+
+    def resolve_model(self, preferences):
+        return "r"
+
+    def supports_vision(self):
+        return False
+
+    def chat(self, messages, tools=None, system=None, **kw):
+        self.requests.append([m.content for m in messages])
+        return LLMResponse(text="noted", provider=self.name, model="r")
+
+
+def hud_on(memory):
+    rec = Recorder()
+    agent = Agent(ProviderRouter([rec]), ToolRegistry(), memory, S())
+    return BantuApp(agent, S(), install_hotkey=False, show_tray=False), rec
+
+
+def bubbles(hud):
+    return [(w.role, w.label.text()) for w in hud.panel.items() if isinstance(w, Bubble)]
+
+
+mem.new_conversation()
+mem.open_conversation(first)
+latest = first
+mem.new_conversation()  # as main.build leaves it: a fresh, empty id
+hud, rec = hud_on(mem)
+check("a recent chat is reopened on start", hud.agent.memory.conversation == latest)
+check("...and its messages are shown",
+      bubbles(hud)[-2:] == [("user", "and tomorrow?"), ("assistant", "Nothing yet.")], str(bubbles(hud)))
+check("...with no 'is ready' greeting in the middle of it", not any("is ready" in t for _, t in bubbles(hud)))
+hud.ask("anything else?")
+pump_until(lambda: not hud.busy)
+check("the next question carries that chat's context", "and tomorrow?" in rec.requests[-1], str(rec.requests[-1]))
+
+hud.busy = True
+hud.panel.set_busy(True)
+locked = not hud.panel.new_chat.isEnabled() and not hud.panel.history.isEnabled()
+hud.new_chat()
+check("...buttons disabled and a click ignored", locked and hud.agent.memory.conversation == latest)
+hud.busy = False
+hud.panel.set_busy(False)
+
+hud.new_chat()
+check("new chat starts a fresh conversation", hud.agent.memory.conversation not in (first, second))
+check("...shows only a greeting", len(bubbles(hud)) == 1 and bubbles(hud)[0][1].startswith("New chat."), str(bubbles(hud)))
+hud.ask("fresh question")
+pump_until(lambda: not hud.busy)
+check("...and the model no longer sees the old chat",
+      rec.requests[-1] == ["fresh question"], str(rec.requests[-1]))
+
+menu = hud.history_menu()
+actions = [a for a in menu.actions() if a.isEnabled()]
+check("history lists every chat, newest first", len(actions) == 3 and actions[0].text().startswith("fresh question"),
+      str([a.text() for a in actions]))
+check("...with the open chat ticked", actions[0].isChecked() and not any(a.isChecked() for a in actions[1:]))
+target = next(a for a in actions if a.text().startswith("battery?"))
+target.trigger()
+check("choosing one switches the conversation", hud.agent.memory.conversation == second)
+check("...and shows its transcript", bubbles(hud) == [("user", "battery?"), ("assistant", "60% and charging.")],
+      str(bubbles(hud)))
+hud.shutdown()
+
+old = Memory(Path(tempfile.mkdtemp()) / "stale.db")
+stale = old.conversation
+old.append(Message.user("from last week"))
+old.append(Message.assistant("ok"))
+old.db.execute("UPDATE messages SET created_at = created_at - ?", (RESUME_WITHIN_S + 60,))
+old.db.commit()
+old.new_conversation()
+hud, rec = hud_on(old)
+check("a chat older than the resume window is not reopened", hud.agent.memory.conversation != stale)
+check("...Bantu greets instead", len(bubbles(hud)) == 1 and "is ready" in bubbles(hud)[0][1], str(bubbles(hud)))
+check("...and the old chat is still in history",
+      any(a.text().startswith("from last week") for a in hud.history_menu().actions()))
+hud.shutdown()
+
+empty = Memory(Path(tempfile.mkdtemp()) / "empty.db")
+hud, rec = hud_on(empty)
+items = [a for a in hud.history_menu().actions()]
+check("with no chats yet, history says so", len(items) == 1 and not items[0].isEnabled(), str([a.text() for a in items]))
+hud.shutdown()
+
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 for f in FAIL:
     print("  FAILED:", f)

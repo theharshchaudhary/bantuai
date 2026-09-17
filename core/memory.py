@@ -221,14 +221,42 @@ class Memory:
         )
 
     def recent_conversations(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Conversations with at least one user message, most recently active first.
+
+        Each has: conversation, started, last (timestamps), n (messages), first_user.
+        """
         rows = self.db.execute(
-            "SELECT conversation, MIN(created_at) started, COUNT(*) n,"
+            "SELECT conversation, MIN(created_at) started, MAX(created_at) last, COUNT(*) n,"
             " (SELECT content FROM messages m2 WHERE m2.conversation=m.conversation"
             "  AND m2.role='user' ORDER BY id LIMIT 1) first_user"
-            " FROM messages m GROUP BY conversation ORDER BY started DESC LIMIT ?",
+            " FROM messages m GROUP BY conversation HAVING first_user IS NOT NULL"
+            " ORDER BY last DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def open_conversation(self, conversation: str) -> bool:
+        """Continue an earlier conversation. False, and nothing changes, if there is none."""
+        found = self.db.execute(
+            "SELECT 1 FROM messages WHERE conversation=? LIMIT 1", (conversation,)
+        ).fetchone()
+        if found is None:
+            return False
+        self.conversation = conversation
+        return True
+
+    def transcript(self, limit: int = 60) -> list[tuple[str, str]]:
+        """What a person saw in this conversation, oldest first: (role, text).
+
+        Only their messages and replies with words in them; tool calls and tool
+        results are plumbing, not conversation.
+        """
+        rows = self.db.execute(
+            "SELECT role, content FROM messages WHERE conversation=? AND role IN ('user','assistant')"
+            " AND content IS NOT NULL AND TRIM(content) != '' ORDER BY id DESC LIMIT ?",
+            (self.conversation, limit),
+        ).fetchall()
+        return [(r["role"], r["content"]) for r in reversed(rows)]
 
     # --- facts --------------------------------------------------------------
 
