@@ -42,7 +42,8 @@ from core.memory import Memory
 from core.reminders import ReminderScheduler
 from core.providers.base import ProviderError
 from core.providers.router import build_router
-from core.tools import builtin
+from core.records import Records
+from core.tools import builtin, notes
 from core.tools.registry import Tier, Tool, ToolRegistry
 
 BANNER = """\
@@ -102,6 +103,8 @@ def build(settings: cfg.Settings | None = None) -> tuple[Agent, cfg.Settings]:
     memory = Memory(cfg.user_data_dir() / "history.db")
 
     builtin.register(_REGISTRY, memory)
+    records = Records(memory.db)
+    notes.register(_REGISTRY, records, memory)
     # Core tools go with every request; everything else loads on demand. Sending
     # all of them fit only ~2 agent turns a minute into Groq's free token cap.
     _REGISTRY.enable_lazy_loading(base={"core"})
@@ -165,7 +168,7 @@ def build(settings: cfg.Settings | None = None) -> tuple[Agent, cfg.Settings]:
             except Exception:
                 pass
 
-    scheduler = ReminderScheduler(memory, announce)
+    scheduler = ReminderScheduler(memory, announce, records=records)
     scheduler.start()
 
     global _SPEAKER, _LISTENER

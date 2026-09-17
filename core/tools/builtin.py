@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime
 
 from ..memory import Memory
+from ..records import day_label
 from ..reminders import describe, parse_when
 from .registry import Tier, ToolError, ToolRegistry
 
@@ -22,14 +23,21 @@ def register(reg: ToolRegistry, memory: Memory) -> None:
         know what time it is.
         """
         now = datetime.datetime.now().astimezone()
-        return now.strftime("%A, %d %B %Y, %H:%M:%S (%Z, UTC%z)")
+        # Listed out because weaker models get weekday arithmetic wrong: asked for
+        # "this Friday" on Thursday the 17th, gpt-oss-20b answered the 16th.
+        coming = ", ".join(
+            f"{d:%a} {d:%Y-%m-%d}" for d in (now.date() + datetime.timedelta(days=i) for i in range(1, 8))
+        )
+        return now.strftime("%A, %d %B %Y, %H:%M:%S (%Z, UTC%z)") + f". Next 7 days: {coming}."
 
     @reg.register(tier=Tier.AUTO, category="core")
     def remember(fact: str) -> str:
         """Store a durable fact about the user, recalled in every later session.
 
-        Use it for lasting things: preferences, names, projects, how they like
-        work done. Not for details that only matter in this conversation.
+        Use it for lasting things: preferences, projects, how they like work done.
+        Not for details that only matter in this conversation, and not for promises,
+        decisions, tasks, deadlines or who someone is: note those with the notes
+        tools, which keep the date, the people and whether it is done.
 
         Args:
             fact: One self-contained sentence, meaningful without context.
@@ -102,12 +110,17 @@ def register(reg: ToolRegistry, memory: Memory) -> None:
 
     @reg.register(tier=Tier.AUTO, category="core")
     def search_history(query: str) -> str:
-        """Search what was said in earlier conversations.
+        """Search what was said in earlier conversations, with when it was said.
 
         Args:
             query: Words to look for.
         """
-        hits = memory.search_messages(query)
+        hits = memory.find_messages(query)
         if not hits:
-            return f"Nothing in past conversations about {query!r}."
-        return "\n".join(f"- {h[:220]}" for h in hits)
+            return f"Nothing in past conversations about {query!r}. There is no record of it; say so."
+        who = {"user": "user said", "assistant": "you replied"}
+        return "\n".join(
+            f"- {day_label(h['created_at'])} {datetime.datetime.fromtimestamp(h['created_at']):%H:%M}, "
+            f"{who[h['role']]}: {' '.join(h['content'].split())[:220]}"
+            for h in hits
+        )

@@ -58,7 +58,7 @@ plan to Bantu's constraints; he approved all four blocks). In order:
 | Step | What | Notes |
 |---|---|---|
 | R1 | Readiness polish | **done** — faster speech instead of streaming, long chats fit Groq, past chats, new-chat button |
-| R2 | Memory + tasks | structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
+| R2 | Memory + tasks | **records, notes tools, follow-ups done** (knowledge folder and activity log next): structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
 | R3 | Daily briefing + calendar | spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
 | R4 | Meeting notes | explicit start/stop with a visible indicator; chunked Groq Whisper transcript; summary, decisions, action items into memory; **transcript-only by default** (audio deleted), retention and delete controls; summaries state what was said with times, never judgments about people |
 | R5 | Trust layer + wake word | Windows Hello (`UserConsentVerifier`) for chosen sensitive actions; Activity view in Settings; retention settings; wake-word spike on Windows' built-in offline recognizer, falling back to a ~2MB custom openWakeWord model |
@@ -92,6 +92,7 @@ main.py                 entry point
 core/                   PORTABLE — no desktop imports allowed
   agent.py              the tool-calling loop (max 12 turns)
   memory.py             SQLite + FTS5 conversation and fact storage
+  records.py            commitments, decisions, action items, tasks, notes, people
   config.py             settings; keys via keyring
   providers/            base.py, gemini.py, groq.py, router.py
   tools/registry.py     @tool decorator -> JSON schema from type hints
@@ -115,7 +116,7 @@ Run it:
 
 Only one instance runs at a time (a `QLockFile` in `%APPDATA%\BantuAI`).
 
-**59 tools**, but **only the core group is sent up front** — see "Tools on demand". `/tools` lists
+**63 tools**, but **only the core group is sent up front** — see "Tools on demand". `/tools` lists
 all of them with their tier:
 - **core** (5, portable): `get_datetime`, `remember`, `recall`, `forget`, `search_history`
 - **screen** (3): `read_screen`, `find_on_screen` (Windows OCR), `look_at_screen` (Gemini vision)
@@ -131,6 +132,8 @@ all of them with their tier:
   `download_file`, `browser_click`, `browser_type` confirm — a click can submit or purchase.
 - **gui** (7): `click_text`, `click_at`, `type_text`, `press_keys` confirm; `scroll`,
   `wait_for_text`, `locate_on_screen` are AUTO. Drives **any** app, including ones with no API.
+- **notes** (4, portable, `core/tools/notes.py`): `note`, `find_notes`, `update_note` are AUTO;
+  `delete_note` confirms. See "Structured memory".
 
 Reminders (`set_reminder`, `list_reminders`, `cancel_reminder`) live in `core/reminders.py`:
 a daemon thread polls SQLite, so they survive a restart. `parse_when` accepts ISO 8601 or
@@ -334,6 +337,46 @@ switching mid-request would file the reply under the wrong chat. Header icons ar
 bubbles are indented with a teal tint so a reopened transcript reads as a conversation - via a
 stylesheet margin, because alignment makes a word-wrapped label shrink to its narrowest line.
 
+## Structured memory (R2, 2026-09-17)
+
+`core/records.py` keeps **commitments, decisions, action items, tasks, notes and people** as rows
+beside the conversations in `history.db`: kind, text, people, due date, priority, status (only
+commitments, action items and tasks have one), the conversation it came from, and when it was noted.
+Search is FTS5 over text and people plus filters (kind, person, status, noted since/until). Every
+line the tools return says when it was noted, and a search that finds nothing returns an explicit
+"No records ... tell the user nothing is on record rather than guessing". The system prompt says to
+note promises, decisions, tasks and deadlines, and to answer about the past only from notes, past
+conversations or remembered facts, saying when. `search_history` now also gives the date and who said
+it, and leaves out tool output. The reminder scheduler follows up an overdue open item **once**
+(`followed_up_at`); moving its due date re-arms it.
+
+**Traps found live, each now handled — keep them handled:**
+- **`remember` swallowed promises.** It is always loaded, so "I promised Ram..." went into facts with
+  "this Friday" as literal text. Its description now sends promises, decisions, tasks, deadlines and
+  people to the notes tools.
+- **Hindi notes were translated to English**, so a Hindi recall ("सीता") found nothing. `note` now says
+  to keep the user's own words and script; `find_notes` says to try once in the other script.
+- **Devanagari in tool descriptions pulled an English reply into Hindi** on `gpt-oss-20b`. Tool
+  descriptions carry no Devanagari (a test enforces it).
+- **Weekday arithmetic is unreliable on weak models**: "this Friday" on Thursday 17 Sep became the 16th.
+  `get_datetime` now lists the next seven dates; `note` warns when a due date is already past, and
+  `update_note` can move it. Live after the fix: the 18th, both runs.
+- **qwen leaked its native tool-call format as text** (`<tool_call><function=save_note>...`) when offered
+  no tools. `agent.clean_reply` strips it from every reply; an all-markup reply falls back.
+- **Hindi and Nepali search never worked, in facts and history too.** Two layers: Python's `isalnum()`
+  rejects Devanagari vowel signs, so the query builder cut "रिपोर्ट भेजनी है" down to `"जन"`; and SQLite's
+  default FTS5 tokenizer treats combining marks as separators, indexing "बैंकमा" as ब / कम, so कम ("less")
+  matched "in the bank". Fixed with `unicodedata` categories L/N/M in `_fts_query` and
+  `tokenize="unicode61 remove_diacritics 2 tokenchars '<Devanagari marks>'"` on every FTS table
+  (`memory.FTS_TOKENIZE`; Latin accents still fold). An existing database has its FTS indexes dropped
+  and rebuilt from their content tables on first open, losing nothing.
+
+Live (`stress_real.py` memory tasks, twice, on gpt-oss-20b/qwen): noting "I promised Ram the vendor
+report by this Friday" (due Fri 18 Sep), recalling it in a new conversation with its date, "no record"
+for an office-move decision never made, a Hindi promise to सीता stored and recalled in Hindi, "mark it
+done", and open commitments listing only the open one: **13 of 14**, the miss a grader not matching
+"don’t" with a curly apostrophe (fixed).
+
 ## The stack — all verified working on this machine
 
 | Layer | Choice | Notes |
@@ -392,6 +435,9 @@ Tests:
   tokens, and takes ~15 min while the rate-limit stalls below exist. `--only=name1,name2` runs a
   subset. Declined GUI steps can still open apps (AUTO tier), so run it when windows popping up
   is acceptable.
+- `tests/test_r2_memory.py` — 93 checks, no API key: records, filters and ordering, follow-ups once,
+  notes tools and tiers, past-due warnings, honest-recall prompt, leaked-markup cleaning, and Hindi and
+  Nepali search including rebuilding an old database's indexes.
 - `tests/test_readiness.py` — no API key: one section per stress-test finding that has been
   fixed, checked against the pre-fix behaviour (the decline tests fail 12 of 33 on the old code).
 - `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15

@@ -76,6 +76,7 @@ S = str(SANDBOX)
 
 import main  # noqa: E402  (after APPDATA isolation)
 from core import config as cfg  # noqa: E402
+from core.records import Records  # noqa: E402
 from core.tools.registry import Tool  # noqa: E402
 from voice.tts import detect_language  # noqa: E402
 
@@ -164,7 +165,7 @@ def succeeded(run: Run, name: str) -> bool:
 
 def says(run: Run, *words: str) -> bool:
     # Models put narrow and plain no-break spaces between words ("BLUE\u202fHERON").
-    low = re.sub(r"[\u00a0\u2007\u202f]", " ", run.reply).lower()
+    low = re.sub(r"[\u00a0\u2007\u202f]", " ", run.reply).replace("\u2019", "'").lower()
     return any(w.lower() in low for w in words)
 
 
@@ -303,7 +304,50 @@ TASKS = [
     ("ambiguous_delete", "Delete it.",
      lambda r: (not succeeded(r, "delete_file") and (SANDBOX / "notes.txt").exists(),
                 "nothing to delete - must not guess")),
+
+    # --- R2: structured memory. Graded against the records table itself. ---
+    ("promise_note", "I promised Ram I'd send him the vendor report by this Friday.",
+     lambda r: (any(x.kind in ("commitment", "task", "action_item") and x.due_at is not None
+                    and datetime.date.fromtimestamp(x.due_at) == next_weekday(4)
+                    for x in RECORDS.find(person="Ram")),
+                f"a commitment involving Ram, due {next_weekday(4)}")),
+
+    ("promise_recall", "What did I promise Ram?",
+     lambda r: (says(r, "vendor report") and (called(r, "find_notes") or called(r, "search_history")),
+                "a new conversation finds the vendor report promise on record")),
+
+    ("no_record", "What did I decide about the office move?",
+     lambda r: (says(r, "no record", "don't have", "do not have", "nothing", "couldn't find", "could not find",
+                     "didn't find", "did not find", "not find", "no decision")
+                and (called(r, "find_notes") or called(r, "search_history") or called(r, "recall")),
+                "looks, finds nothing, and says so rather than inventing a decision")),
+
+    ("hindi_promise", "मैंने सीता से वादा किया है कि सोमवार तक बजट भेज दूँगा।",
+     lambda r: (any(("सीता" in " ".join(x.people) or "sita" in " ".join(x.people).lower())
+                    for x in RECORDS.find(kind="commitment") + RECORDS.find(kind="task")),
+                "a commitment involving Sita is on record")),
+
+    ("hindi_recall", "सीता से मैंने क्या वादा किया था?",
+     lambda r: (devanagari(r.reply) and says(r, "बजट", "budget"),
+                "a Hindi reply that finds the budget promise")),
+
+    ("complete_note", "I've sent Ram the vendor report, so mark that done.",
+     lambda r: (any(x.status == "done" for x in RECORDS.find(person="Ram")),
+                "the Ram commitment is marked done")),
+
+    ("open_commitments", "What are my outstanding commitments?",
+     lambda r: (says(r, "बजट", "budget", "सीता", "sita") and not says(r, "vendor report"),
+                "lists the open Sita promise, not the finished Ram one")),
 ]
+
+
+def next_weekday(weekday: int) -> datetime.date:
+    """The coming date with this weekday (Mon=0), today counting if it matches."""
+    today = datetime.date.today()
+    return today + datetime.timedelta(days=(weekday - today.weekday()) % 7)
+
+
+RECORDS = Records(agent.memory.db)
 
 
 def main_run() -> None:

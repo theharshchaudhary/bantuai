@@ -13,6 +13,7 @@ import base64
 import json
 import sqlite3
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,18 @@ def _unpack_meta(raw: Any) -> dict[str, Any]:
     }
 
 
+#: SQLite's default FTS5 tokenizer treats combining marks as separators, so it
+#: indexed "रिपोर्ट" as र / प / र / ट and "बैंकमा" as ब / कम: a search for कम
+#: ("less") matched "in the bank". Declaring the Devanagari marks as word
+#: characters indexes whole Hindi and Nepali words. remove_diacritics 2 still
+#: folds Latin accents, so "cafe" finds "café". Verified on SQLite 3.45.
+DEVANAGARI_MARKS = "".join(
+    chr(c) for c in range(0x0900, 0x0980) if unicodedata.category(chr(c)).startswith("M")
+)
+FTS_TOKENIZE = f"unicode61 remove_diacritics 2 tokenchars '{DEVANAGARI_MARKS}'"
+#: FTS tables that must use it, and are rebuilt in place if an older database did not.
+_FTS_TABLES = ("facts_fts", "messages_fts")
+
 #: Rough chars-per-token. Deliberately pessimistic — better to trim early than
 #: to have a provider reject an oversized request mid-task.
 CHARS_PER_TOKEN = 3.6
@@ -65,7 +78,7 @@ CREATE TABLE IF NOT EXISTS facts (
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
-    text, content='facts', content_rowid='id'
+    text, content='facts', content_rowid='id', tokenize="{TOKENIZE}"
 );
 CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
     INSERT INTO facts_fts(rowid, text) VALUES (new.id, new.text);
@@ -84,7 +97,7 @@ CREATE TABLE IF NOT EXISTS reminders (
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(fired_at, due_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    content, content='messages', content_rowid='id'
+    content, content='messages', content_rowid='id', tokenize="{TOKENIZE}"
 );
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
     INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
@@ -111,8 +124,13 @@ def _fts_query(text: str) -> str:
 
     User text goes straight into MATCH otherwise, where a stray quote or a bare
     AND is a syntax error rather than a search.
+
+    Word characters are letters, digits and combining marks. Python's isalnum()
+    rejects Devanagari vowel signs, which split "रिपोर्ट" into fragments too short
+    to keep: every Hindi and Nepali recall found nothing until this was fixed.
     """
-    words = [w for w in "".join(c if c.isalnum() else " " for c in text).split() if len(w) > 1]
+    kept = "".join(c if unicodedata.category(c)[0] in "LNM" else " " for c in text)
+    words = [w for w in kept.split() if len(w) > 1]
     return " OR ".join(f'"{w}"' for w in words[:12])
 
 
@@ -125,7 +143,7 @@ class Memory:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(self.path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
-        self.db.executescript(SCHEMA)
+        self.db.executescript(SCHEMA.replace("{TOKENIZE}", FTS_TOKENIZE))
         self._migrate()
         self.db.commit()
         if not self.conversation:
@@ -138,6 +156,19 @@ class Memory:
             self.db.execute(
                 "ALTER TABLE messages ADD COLUMN image_count INTEGER NOT NULL DEFAULT 0"
             )
+        stale = [
+            t for t in _FTS_TABLES
+            if "tokenchars" not in (self.db.execute(
+                "SELECT sql FROM sqlite_master WHERE name=?", (t,)).fetchone() or {"sql": "tokenchars"})["sql"]
+        ]
+        for table in stale:
+            # The index is derived from its content table, so it can be recreated
+            # with the Devanagari-aware tokenizer and refilled without losing anything.
+            self.db.execute(f"DROP TABLE {table}")
+        if stale:
+            self.db.executescript(SCHEMA.replace("{TOKENIZE}", FTS_TOKENIZE))
+            for table in stale:
+                self.db.execute(f"INSERT INTO {table}({table}) VALUES('rebuild')")
 
     def close(self) -> None:
         self.db.close()
@@ -334,15 +365,25 @@ class Memory:
         return cur.rowcount > 0
 
     def search_messages(self, query: str, limit: int = 10) -> list[str]:
+        return [m["content"] for m in self.find_messages(query, limit)]
+
+    def find_messages(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Past messages matching `query`, best first, with role and time.
+
+        Only what a person said or read: user messages and replies. Tool results
+        are machine output, and quoting one as "you said" would be wrong.
+        """
         q = _fts_query(query)
         if not q:
             return []
         try:
             rows = self.db.execute(
-                "SELECT m.content FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid"
-                " WHERE messages_fts MATCH ? AND m.content IS NOT NULL ORDER BY rank LIMIT ?",
+                "SELECT m.role, m.content, m.created_at, m.conversation FROM messages_fts"
+                " JOIN messages m ON m.id = messages_fts.rowid"
+                " WHERE messages_fts MATCH ? AND m.content IS NOT NULL AND m.role IN ('user', 'assistant')"
+                " ORDER BY rank LIMIT ?",
                 (q, limit),
             ).fetchall()
         except sqlite3.OperationalError:
             return []
-        return [r["content"] for r in rows]
+        return [dict(r) for r in rows]

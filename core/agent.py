@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
@@ -45,6 +46,11 @@ Be concise. No preamble, no restating the question, no offers of further help
 unless they are genuinely useful. When a tool fails, say plainly what failed and
 what you tried instead.
 
+When {user} makes a promise, reaches a decision, takes on a task or mentions a deadline,
+note it with the notes tools, in their own words. Answer questions about their past only from notes, past conversations or
+remembered facts, and say when it happened; if nothing is found, say there is no
+record of it rather than guessing.
+
 Never claim to have done something you did not do. If a tool errored, say so.
 If {user} says no to a step, that request is over: never look for another way
 to do it.
@@ -59,6 +65,18 @@ latest message, say what you did not do because they said no. Do not blame a
 policy or an error, and do not offer another way to do it."""
 
 SKIPPED_AFTER_DECLINE = "Not run: the user said no to an earlier step of this request."
+
+#: Some models write their native tool-call markup as plain text, seen from qwen
+#: on Groq when no tools were offered: "<tool_call><function=save_note>...". Shown
+#: as a reply it is gibberish, so it is removed before anyone sees it.
+_LEAKED_CALL = re.compile(r"<tool_call>.*?(?:</tool_call>|$)|<function=.*?(?:</function>|$)", re.S)
+
+
+def clean_reply(text: str | None) -> str:
+    text = text or ""
+    cleaned = _LEAKED_CALL.sub("", text)
+    return (re.sub(r"[ 	]{2,}", " ", cleaned) if cleaned != text else cleaned).strip()
+
 
 #: Groq's free tier refuses any single request over 8,000 tokens - its per-minute
 #: cap - so a long HUD conversation would otherwise push every request to Gemini.
@@ -211,7 +229,7 @@ class Agent:
             self.memory.append(Message.assistant(resp.text or None, resp.tool_calls))
 
             if not resp.wants_tools:
-                text = (resp.text or "").strip() or "(no reply)"
+                text = clean_reply(resp.text) or "(no reply)"
                 self._emit("text", text=text)
                 return AgentResult(text, turn + 1, total_calls, resp.provider, resp.model)
 
@@ -312,7 +330,7 @@ class Agent:
                 max_output_tokens=budget,
                 on_wait=self._waiting,
             )
-            text, provider, model = (resp.text or "").strip(), resp.provider, resp.model
+            text, provider, model = clean_reply(resp.text), resp.provider, resp.model
         except ProviderError as e:
             log.warning("closing reply failed: %s", e)
         text = text or fallback

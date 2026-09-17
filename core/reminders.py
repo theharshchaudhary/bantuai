@@ -17,6 +17,7 @@ import time
 from typing import Callable
 
 from .memory import Memory
+from .records import Records, when_label
 
 log = logging.getLogger("bantu.reminders")
 
@@ -88,8 +89,15 @@ class ReminderScheduler:
     A daemon thread so it never keeps the process alive on its own.
     """
 
-    def __init__(self, memory: Memory, notify: NotifyFn, tick: int = TICK_SECONDS):
+    def __init__(
+        self,
+        memory: Memory,
+        notify: NotifyFn,
+        tick: int = TICK_SECONDS,
+        records: Records | None = None,
+    ):
         self.memory = memory
+        self.records = records
         self.notify = notify
         self.tick = max(1, tick)
         self._stop = threading.Event()
@@ -108,7 +116,7 @@ class ReminderScheduler:
             self._thread.join(timeout=2)
 
     def check_now(self) -> int:
-        """Fire anything due. Returns how many fired. Used by the loop and tests."""
+        """Fire anything due, and follow up overdue work once. Returns how many were announced."""
         fired = 0
         for r in self.memory.due_reminders():
             try:
@@ -118,6 +126,15 @@ class ReminderScheduler:
                 # forever, re-firing on every tick.
                 log.exception("could not announce reminder %s", r["id"])
             self.memory.mark_fired(r["id"])
+            fired += 1
+        for item in self.records.overdue_unannounced() if self.records else []:
+            who = f" ({', '.join(item.people)})" if item.people else ""
+            try:
+                self.notify("Overdue", f"{item.text}{who} - was due {when_label(item.due_at)}")
+            except Exception:
+                log.exception("could not announce overdue record %s", item.id)
+            # Once only: a follow-up repeated every 20 seconds is nagging, not help.
+            self.records.mark_followed_up(item.id)
             fired += 1
         return fired
 
