@@ -52,6 +52,27 @@ Owner: Harsh. Repo: `theharshchaudhary/bantuai`, branch `main`.
 past chats, new-chat button), and more abilities (image generation if Pollinations.ai is really
 free, a knowledge folder).
 
+**Roadmap after readiness** (Harsh, 2026-09-17, adapting his earlier "AI executive personal assistant"
+plan to Bantu's constraints; he approved all four blocks). In order:
+
+| Step | What | Notes |
+|---|---|---|
+| R1 | Readiness polish | streamed replies, past chats in the panel, new-chat button |
+| R2 | Memory + tasks | structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
+| R3 | Daily briefing + calendar | spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
+| R4 | Meeting notes | explicit start/stop with a visible indicator; chunked Groq Whisper transcript; summary, decisions, action items into memory; **transcript-only by default** (audio deleted), retention and delete controls; summaries state what was said with times, never judgments about people |
+| R5 | Trust layer + wake word | Windows Hello (`UserConsentVerifier`) for chosen sensitive actions; Activity view in Settings; retention settings; wake-word spike on Windows' built-in offline recognizer, falling back to a ~2MB custom openWakeWord model |
+
+Spikes to run before building on them: Groq Whisper long-audio limits, Windows Hello from a desktop
+Python process, built-in keyword-spotting accuracy, the iCal feed. **Email: decide later** (Gmail via
+IMAP app password is the likely $0 route; Outlook needs an app registration). Image generation via
+Pollinations.ai is still unverified.
+
+Adopted from that plan but already true in Bantu: risk tiers enforced in code, no financial actions.
+Rejected, with reasons: a server, web dashboard and mobile app (no-server rule); voice-based speaker
+verification and diarization (no $0 option without large downloads; Windows Hello verifies better);
+vector search (embedding download, or sending all memory to Google); always-on ambient recording.
+
 Post-v1: proactive trigger engine (v1.1), semantic memory + habits (v1.2), Home Assistant + phone (v2).
 
 Leads from reading Shreshth Kaushik's "advanced Jarvis" gists (2026-09-17) — ideas only, the
