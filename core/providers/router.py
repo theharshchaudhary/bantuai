@@ -22,6 +22,7 @@ from .base import (
     Message,
     ProviderError,
     RateLimited,
+    ToolNotLoaded,
     ToolSpec,
     TransientError,
 )
@@ -111,6 +112,11 @@ class ProviderRouter:
                     max_output_tokens=max_output_tokens,
                 )
                 return resp
+
+            except ToolNotLoaded:
+                # A request-shape problem, not an outage: trying Gemini would
+                # only spend the scarce vision budget on the same rejection.
+                raise
 
             except RateLimited as e:
                 s.failures += 1

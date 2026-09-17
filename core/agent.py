@@ -20,6 +20,7 @@ from .providers.base import (
     Message,
     ProviderError,
     ToolCall,
+    ToolNotLoaded,
 )
 from .providers.router import ProviderRouter
 from .tools.registry import ConfirmFn, Tier, Tool, ToolRegistry
@@ -96,11 +97,17 @@ class Agent:
         if facts:
             joined = "\n".join(f"- {f}" for f in facts)
             block = f"\n\nThings you already know about {self.settings.username}:\n{joined}"
-        return SYSTEM_TEMPLATE.format(
+        prompt = SYSTEM_TEMPLATE.format(
             assistant=self.settings.assistant_name,
             user=self.settings.username,
             facts=block,
         )
+        if getattr(self.registry, "lazy", False):
+            prompt += (
+                "\n\nYou start with only a few tools. When a task needs more - files, apps, "
+                "the web, the screen - call load_tools first, loading every group you need at once."
+            )
+        return prompt
 
     def run(self, user_text: str, images: Iterable[Image] | None = None) -> AgentResult:
         """Handle one user request start to finish."""
@@ -108,7 +115,6 @@ class Agent:
         self.registry.new_task()  # per-task approvals never leak between requests
         self.memory.append(Message.user(user_text, images))
 
-        specs = self.registry.specs()
         system = self._system()
         max_turns = int(getattr(self.settings, "max_tool_turns", 12))
         budget = int(getattr(self.settings, "max_output_tokens", 2048))
@@ -116,8 +122,11 @@ class Agent:
 
         total_calls = 0
         last: LLMResponse | None = None
+        recoveries = 0
 
         for turn in range(max_turns):
+            # Recomputed every turn: load_tools changes what is available mid-task.
+            specs = self.registry.specs()
             history = self.memory.history()
             # Memory stores no image bytes, so re-attach this run's images to the
             # user turn they belong to. Without this the model is handed a
@@ -139,6 +148,15 @@ class Agent:
                     max_output_tokens=budget,
                     needs_vision=needs_vision,
                 )
+            except ToolNotLoaded as e:
+                tool = self.registry.tools.get(e.tool_name)
+                if tool is not None and recoveries < 2:
+                    recoveries += 1
+                    self.registry.load([tool.category])
+                    log.info("model called unloaded %s; loaded %s and retrying", e.tool_name, tool.category)
+                    continue
+                self._emit("error", text=str(e))
+                return AgentResult(f"Something went wrong: {e}", turn, total_calls, stopped_early=True)
             except AllProvidersFailed as e:
                 msg = self._explain(e)
                 self._emit("error", text=msg)

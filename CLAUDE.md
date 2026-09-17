@@ -76,7 +76,8 @@ Run it:
 
 Only one instance runs at a time (a `QLockFile` in `%APPDATA%\BantuAI`).
 
-**59 tools so far** — `/tools` lists them with their tier:
+**59 tools**, but **only the core group is sent up front** — see "Tools on demand". `/tools` lists
+all of them with their tier:
 - **core** (5, portable): `get_datetime`, `remember`, `recall`, `forget`, `search_history`
 - **screen** (3): `read_screen`, `find_on_screen` (Windows OCR), `look_at_screen` (Gemini vision)
 - **files** (15): `search_files`, `read_file`, `read_document`, `list_directory`, `file_info`,
@@ -99,6 +100,49 @@ wrong time is worse than one that is refused. The model is told to call `get_dat
 compute the absolute time itself.
 Tools default to `Tier.CONFIRM` when unspecified — a tool author who forgets to think about safety
 gets the cautious behaviour, not the dangerous one.
+
+## Tools on demand
+
+Harsh chose this on 2026-09-17 over failing over to Gemini (which would spend the vision budget)
+or waiting visibly (no faster).
+
+**Why.** Sending all 59 tool schemas cost ~3,750 input tokens per request. Groq's free tier allows
+8,000 tokens/minute, so only about two agent turns fit in a minute, and the Groq SDK then retries
+*silently* (`max_retries=2`): turns stalled ~28s each while reporting success. The argument
+schemas cost twice what the descriptions do (~3,090 vs ~1,450 tokens), so trimming descriptions
+was the wrong lever.
+
+**How.** `registry.enable_lazy_loading(base={"core"})` in `main.py`. Only core tools go up front,
+plus a `load_tools` catalog: one line per group, with the group names as an enum so Groq rejects a
+group that does not exist. Loaded groups stay loaded while used and **expire after 3 tasks unused**
+— necessary because the HUD keeps one long conversation, and without expiry every group would
+accumulate and requests would grow back to full size. Each group's catalog line is set with
+`reg.describe_category()` in the module that owns its tools; **keep those lines accurate**, since
+the model decides what to load from them alone. Lazy loading is opt-in on the registry, so tests
+that build a registry directly still see every tool.
+
+**Measured.**
+
+| | before | after |
+|---|---|---|
+| sent up front | 59 tools, ~4,700 tok | 9 tools, ~780 tok |
+| a GUI task (gui + screen loaded) | 59 tools | 19 tools, ~2,000 tok |
+| "time + reminders" task | **58.5s** (1.1 / 28.8 / 28.5) | **2.9s** (1.9 / 0.5 / 0.4) |
+
+Verified live: the real model calls `load_tools` with the right group itself (`system` for
+battery, `web` for a search). Sustained back-to-back tasks can still exhaust the minute's tokens —
+one web answer stalled 9.9s — so this is much rarer, not gone.
+
+**Groq rejects a call to a tool not in the request** with a 400 naming it: `attempted to call tool
+'search_files' which was not in request.tools`. The adapter raises `ToolNotLoaded`, the router
+**re-raises it without failing over** (Gemini would reject the same request and only burn quota),
+and the agent loads that tool's group and retries, at most twice. Earlier calls to unloaded tools
+in the *history* are accepted — verified — so long conversations are safe.
+
+**Observed, not yet addressed:** asked who won the most recent Cricket World Cup, the model answered
+"England (2023)" from a search snippet without opening a page. Australia won in 2023. Answer
+quality from snippets is unreliable; worth a system-prompt nudge to read a source for factual
+claims.
 
 ## The stack — all verified working on this machine
 
@@ -141,6 +185,9 @@ Tests:
 - `tests/test_phase8_live.py` — 23 checks that **really move the mouse and type** (~30s, hands off).
   Drives `tests/gui_target.py`, a separate app that records what happened to it. The only test
   that proves an OCR position becomes a click on the right pixel at real display scaling.
+- `tests/test_lazy_tools.py` — 35 checks, no API key: what goes up front, loading, expiry,
+  permission tiers still enforced, Groq's real rejection text, the router not failing over,
+  agent recovery, and the size saving measured on the real 59 tools.
 - `tests/test_fixes.py` — 34 checks guarding bugs that actually shipped: images surviving the
   agent loop, database migration, reminders, multi-word screen matching, region parsing.
   Add a `test_phaseN.py` per phase and keep them key-free.
@@ -348,15 +395,7 @@ refuses zip-slip paths.
 
 ## Open decisions
 
-- **Throughput on Groq's free tier — needs a decision.** Measured 2026-09-17: every request sends
-  all 59 tool schemas, ~3,750 input tokens. Groq allows 8,000 tokens/minute, so **only about two
-  agent turns fit in a minute**. The Groq SDK then *silently* retries (`max_retries=2` by default):
-  turns 2 and 3 of a simple task each stalled ~28s while reporting success, so the router never saw
-  a 429 and never failed over. A three-step GUI task took 99s. The argument schemas cost ~3,090
-  tokens and the descriptions only ~1,450, so trimming descriptions is the wrong lever. Options:
-  send tools by category on demand; surface 429s and fail over to Gemini (burns the ~120/day vision
-  budget); or wait visibly. Not yet changed — this is Harsh's call.
-
+- ~~Throughput on Groq's free tier~~ — **closed.** Tools load on demand; see "Tools on demand".
 - ~~Voice selection~~ — **closed.** All six voices chosen; see "Language and voice".
 - **Android APK** — wanted eventually, but ~35 of 41 tools are meaningless on a phone and a remote
   client needs a reachable core, which conflicts with "no server". Unresolved; v2 conversation.

@@ -649,6 +649,8 @@ def _target_and_activate(window: str) -> Window:
 
 
 def register(reg: ToolRegistry, router: Any = None, settings: Any = None) -> None:
+    reg.describe_category("gui", "operate any app with mouse and keyboard: click buttons by their text, type, press shortcuts, scroll, wait for text, find icons")
+
     _tracker.start()
 
     @reg.register(tier=Tier.CONFIRM, category="gui")

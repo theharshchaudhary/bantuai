@@ -103,6 +103,8 @@ def shutdown() -> None:
 
 
 def register(reg: ToolRegistry) -> None:
+    reg.describe_category("web", "search the web and news, read web pages, download files, and drive a real browser")
+
     # --- search and read ----------------------------------------------------
 
     @reg.register(tier=Tier.AUTO, category="web")

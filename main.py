@@ -100,6 +100,9 @@ def build() -> tuple[Agent, cfg.Settings]:
     memory = Memory(cfg.user_data_dir() / "history.db")
 
     builtin.register(_REGISTRY, memory)
+    # Core tools go with every request; everything else loads on demand. Sending
+    # all of them fit only ~2 agent turns a minute into Groq's free token cap.
+    _REGISTRY.enable_lazy_loading(base={"core"})
 
     # Windows-only tools are registered INTO the portable core, never imported by it.
     if sys.platform == "win32":

@@ -60,6 +60,8 @@ def check_command(command: str) -> None:
 
 
 def register(reg: ToolRegistry, default_timeout: int = 60) -> None:
+    reg.describe_category("shell", "run a PowerShell command, for anything no other tool covers")
+
     @reg.register(tier=Tier.CONFIRM, category="shell")
     def run_powershell(command: str, timeout_seconds: int = 0) -> str:
         """Run a PowerShell command and return its output.

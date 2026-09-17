@@ -66,6 +66,8 @@ def _stat_line(p: Path) -> str:
 
 
 def register(reg: ToolRegistry) -> None:
+    reg.describe_category("files", "find, read, write, move, copy, organise, zip and delete files; read PDF, Word and Excel documents; disk usage")
+
     # --- reading ------------------------------------------------------------
 
     @reg.register(tier=Tier.AUTO, category="files")

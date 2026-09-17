@@ -141,11 +141,24 @@ def build_schema(fn: Callable) -> tuple[str, dict[str, Any]]:
 ConfirmFn = Callable[[Tool, dict[str, Any]], bool]
 
 
+LOAD_TOOLS = "load_tools"
+
+
 @dataclass
 class ToolRegistry:
     tools: dict[str, Tool] = field(default_factory=dict)
     #: Approvals granted for the current task only; cleared by `new_task()`.
     _session_allow: set[str] = field(default_factory=set)
+
+    #: Lazy loading. None sends every tool on every request. A set sends only
+    #: tools in those categories plus a `load_tools` catalog for the rest.
+    #: Measured: all 59 schemas cost ~3,750 input tokens per request against
+    #: Groq's 8,000 tokens/minute free cap - about two agent turns a minute.
+    base_categories: set[str] | None = None
+    keep_for_tasks: int = 3
+    _summaries: dict[str, str] = field(default_factory=dict)
+    _loaded: dict[str, int] = field(default_factory=dict)
+    _task_no: int = 0
 
     def register(
         self,
@@ -175,13 +188,93 @@ class ToolRegistry:
 
     # --- lookup -------------------------------------------------------------
 
+    # --- categories and lazy loading ------------------------------------
+
+    def enable_lazy_loading(self, base: set[str], keep_for_tasks: int = 3) -> None:
+        """Send only `base` categories up front; the rest load on demand."""
+        self.base_categories = set(base)
+        self.keep_for_tasks = max(1, keep_for_tasks)
+
+    @property
+    def lazy(self) -> bool:
+        return self.base_categories is not None
+
+    def describe_category(self, name: str, summary: str) -> None:
+        """One line the model reads when deciding what to load."""
+        self._summaries[name] = summary.strip()
+
+    def categories(self) -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for t in self.tools.values():
+            if t.tier is not Tier.BLOCKED:
+                out.setdefault(t.category, []).append(t.name)
+        return out
+
+    def active_categories(self) -> set[str]:
+        if not self.lazy:
+            return set(self.categories())
+        return set(self.base_categories or ()) | set(self._loaded)
+
+    def loadable(self) -> list[str]:
+        return sorted(c for c in self.categories() if c not in self.active_categories())
+
+    def load(self, categories: list[str]) -> tuple[list[str], list[str]]:
+        """Make categories available. Returns (loaded, unknown)."""
+        known = self.categories()
+        done, unknown = [], []
+        for c in categories or []:
+            name = str(c).strip().lower()
+            if name in known:
+                self._loaded[name] = self._task_no
+                done.append(name)
+            else:
+                unknown.append(str(c))
+        return done, unknown
+
+    def _load_tools_spec(self) -> ToolSpec | None:
+        pending = self.loadable()
+        if not pending:
+            return None
+        cats = self.categories()
+        lines = [
+            f"- {c}: {self._summaries.get(c) or ', '.join(sorted(cats[c]))}" for c in pending
+        ]
+        description = (
+            "Load more tools. Only a few are available at first. Each group below becomes "
+            "usable after you load it, and stays loaded while you keep using it. Load every "
+            "group a task needs in one call BEFORE trying to use its tools - calling a tool "
+            "from a group that is not loaded fails.\n" + "\n".join(lines)
+        )
+        return ToolSpec(
+            LOAD_TOOLS,
+            description,
+            {
+                "type": "object",
+                "properties": {
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": pending},
+                        "description": "The groups to load.",
+                    }
+                },
+                "required": ["categories"],
+            },
+        )
+
     def specs(self, include_blocked: bool = False) -> list[ToolSpec]:
         """What the model is told it can do. Blocked tools are not advertised."""
-        return [
+        active = self.active_categories()
+        out = [
             t.spec()
             for t in self.tools.values()
-            if include_blocked or t.tier is not Tier.BLOCKED
+            if (include_blocked or t.tier is not Tier.BLOCKED)
+            and (not self.lazy or t.category in active)
         ]
+        if self.lazy:
+            meta = self._load_tools_spec()
+            if meta is not None:
+                out.append(meta)
+        return out
 
     def __len__(self) -> int:
         return len(self.tools)
@@ -190,8 +283,17 @@ class ToolRegistry:
         return name in self.tools
 
     def new_task(self) -> None:
-        """Drop per-task approvals. Call at the start of each user request."""
+        """Drop per-task approvals, and unload groups unused for a while.
+
+        Call at the start of each user request. Expiry matters because the HUD
+        keeps one long conversation: without it every group would stay loaded
+        and requests would grow back to their full size.
+        """
         self._session_allow.clear()
+        self._task_no += 1
+        stale = [c for c, last in self._loaded.items() if self._task_no - last > self.keep_for_tasks]
+        for c in stale:
+            del self._loaded[c]
 
     def allow_for_task(self, name: str) -> None:
         self._session_allow.add(name)
@@ -208,9 +310,25 @@ class ToolRegistry:
         Failures come back as text rather than raising: the model should get the
         chance to recover, and a crashed assistant is worse than a corrected one.
         """
+        if call.name == LOAD_TOOLS and self.lazy:
+            loaded, unknown = self.load((call.arguments or {}).get("categories") or [])
+            parts = []
+            if loaded:
+                names = ", ".join(sorted(n for c in loaded for n in self.categories()[c]))
+                parts.append(f"Loaded {', '.join(loaded)}. You can now use: {names}.")
+            if unknown:
+                parts.append(f"No such group: {', '.join(unknown)}. Groups: {', '.join(sorted(self.categories()))}.")
+            return " ".join(parts) or "Nothing to load."
+
         tool = self.tools.get(call.name)
         if tool is None:
             return f"Error: no tool named {call.name!r}. Available: {', '.join(sorted(self.tools))}"
+
+        if self.lazy:
+            # Using a tool keeps its group loaded. A provider that does not
+            # validate calls server-side can reach an unloaded tool directly;
+            # it still runs, with its permission tier checked below.
+            self._loaded[tool.category] = self._task_no
 
         if tool.tier is Tier.BLOCKED:
             log.warning("blocked tool refused: %s", tool.name)

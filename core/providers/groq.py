@@ -11,6 +11,7 @@ tier; the free tier is gpt-oss, Compound, Qwen and Whisper.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 
@@ -18,6 +19,7 @@ from .base import (
     AuthError,
     ModelUnavailable,
     LLMProvider,
+    ToolNotLoaded,
     LLMResponse,
     Message,
     ProviderError,
@@ -43,6 +45,11 @@ def _classify(exc: Exception) -> ProviderError:
         return RateLimited(f"groq rate limit: {text}", retry_after=retry)
     if code == 404 or "does not exist" in text or "model_not_found" in text:
         return ModelUnavailable(f"groq model unavailable: {text}")
+    # Groq validates tool calls server-side and rejects a call to a tool that was
+    # not in the request, naming it. Verified 2026-09-17.
+    unloaded = re.search(r"attempted to call tool '([^']+)' which was not in request\.tools", text)
+    if unloaded:
+        return ToolNotLoaded(f"groq: {unloaded.group(1)} was not loaded", unloaded.group(1))
     if code in (401, 403) or "invalid_api_key" in text:
         return AuthError(f"groq auth: {text}")
     if code in (500, 502, 503, 504):

@@ -177,6 +177,8 @@ def find_matches(words: list[Word], needle: str, max_span: int = 8) -> list[Matc
 
 
 def register(reg: ToolRegistry) -> None:
+    reg.describe_category("screen", "read the text on screen, find where some text is, or ask a vision question about what the screen shows")
+
     @reg.register(tier=Tier.AUTO, category="screen")
     def read_screen(region: str = "") -> str:
         """Read all text currently visible on screen, using local OCR.

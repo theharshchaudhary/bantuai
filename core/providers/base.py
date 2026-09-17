@@ -47,6 +47,18 @@ class ModelUnavailable(ProviderError):
     """
 
 
+class ToolNotLoaded(ProviderError):
+    """The model called a tool that exists but was not sent with this request.
+
+    Not a provider failure: every provider would reject the same request, so
+    the router must not fail over. The agent loads the tool's group and retries.
+    """
+
+    def __init__(self, msg: str, tool_name: str):
+        super().__init__(msg)
+        self.tool_name = tool_name
+
+
 class AllProvidersFailed(ProviderError):
     def __init__(self, failures: dict[str, Exception]):
         self.failures = failures
