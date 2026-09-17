@@ -45,6 +45,7 @@ from core.providers.router import build_router
 from core import briefing
 from core import weather as weather_tools
 from core import events as calendar_tools
+from core import meetings as meeting_tools
 from core.activity import Activity
 from core.knowledge import Knowledge
 from core.knowledge import register as register_knowledge
@@ -104,6 +105,11 @@ _ANNOUNCERS: list = []
 _KNOWLEDGE: Knowledge | None = None
 _ACTIVITY: Activity | None = None
 _CALENDAR: calendar_tools.Calendar | None = None
+_MEETING_NOTES: meeting_tools.MeetingNotes | None = None
+#: Told about meeting progress ("recording", "writing the meeting summary") and the finished
+#: summary. The HUD registers here; the CLI prints.
+_MEETING_STATUS: list = []
+_MEETING_DONE: list = []
 
 
 def knowledge_folder(settings: cfg.Settings) -> Path:
@@ -234,6 +240,48 @@ def build(settings: cfg.Settings | None = None) -> tuple[Agent, cfg.Settings]:
                 hook(title, body)
             except Exception:
                 pass
+
+    global _MEETING_NOTES
+    meetings_store = meeting_tools.Meetings(memory.db)
+    removed = meetings_store.prune(getattr(settings, "meeting_retention_days", meeting_tools.RETENTION_DAYS))
+    if removed:
+        logging.getLogger("bantu").info("removed %d meeting transcript(s) past retention", removed)
+
+    def recorder_factory(on_chunk):
+        from platform_desktop.recorder import MeetingRecorder, microphone_name
+
+        return MeetingRecorder(on_chunk, mic_name=microphone_name(settings),
+                               on_warning=lambda text: announce("Meeting notes", text))
+
+    def meeting_chat(messages, system):
+        return router.chat(messages, tools=None, system=system, temperature=0.2, max_output_tokens=3000).text
+
+    def meeting_status(text):
+        for hook in list(_MEETING_STATUS):
+            try:
+                hook(text)
+            except Exception:
+                pass
+
+    def meeting_done(meeting_id, text):
+        print(f"\n{CYAN}  [Meeting notes]\n{text}{RESET}", flush=True)
+        for hook in list(_MEETING_DONE):
+            try:
+                hook(meeting_id, text)
+            except Exception:
+                pass
+
+    try:
+        from platform_desktop.recorder import groq_segments_transcriber
+
+        _MEETING_NOTES = meeting_tools.MeetingNotes(
+            meetings_store, records, recorder_factory, groq_segments_transcriber(lambda: cfg.get_key("groq")),
+            meeting_chat, on_status=meeting_status, on_done=meeting_done,
+            known_names=lambda: [n for n in [getattr(settings, "username", "")] if n] + records.people(),
+        )
+        meeting_tools.register(_REGISTRY, _MEETING_NOTES)
+    except Exception as e:
+        logging.getLogger("bantu").warning("meeting notes unavailable: %s", e)
 
     scheduler = ReminderScheduler(
         memory, announce, records=records, calendar=_CALENDAR,

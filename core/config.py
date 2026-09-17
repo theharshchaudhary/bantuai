@@ -124,6 +124,9 @@ class Settings:
     #: Announce a timed event this many minutes before it starts. 0 (the default) never
     #: does: Harsh chose a briefing only when asked, so nothing speaks up uninvited.
     event_alert_minutes: int = 0
+    #: Meeting transcripts older than this are deleted (0 keeps them). Harsh chose 90 days;
+    #: decisions and action items already saved to memory stay.
+    meeting_retention_days: int = 90
 
     # --- setup --------------------------------------------------------------
     #: False until first-run setup completes. Keys found in .env do not count:

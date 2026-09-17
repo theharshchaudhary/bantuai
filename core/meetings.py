@@ -137,9 +137,13 @@ def attribute(chunk: AudioChunk, start: float, end: float) -> str:
 
 
 def is_phantom(text: str, chunk: AudioChunk, start: float, end: float) -> bool:
-    """A stock line over near-silence: Whisper made it up."""
+    """A stock line over near-silence, or no words at all: Whisper made it up."""
     words = " ".join(re.findall(r"[\w']+", text.lower()))
-    if words not in PHANTOM_LINES and words:
+    if not words:
+        return True  # "." or "..." - seen live at the end of a recording
+    # A fragment of one or two words is also suspect: seen live, a lone "We." after the
+    # speech ended, echoed from the previous chunk's text in the prompt.
+    if words not in PHANTOM_LINES and len(words.split()) > 2:
         return False
     loud = max(chunk.mean(chunk.mic_rms, start, end), chunk.mean(chunk.call_rms, start, end))
     return loud < ACTIVE_RMS
@@ -406,7 +410,11 @@ def render_summary(meeting: Meeting, summary: MeetingSummary, saved: int) -> str
 
 # --- the running session ------------------------------------------------------------------
 
-TranscribeFn = Callable[[bytes], list[Segment]]
+#: (wav, prompt) -> segments. The prompt carries names to spell and the end of the
+#: previous chunk, which Whisper uses as context across the boundary.
+TranscribeFn = Callable[[bytes, str], list[Segment]]
+#: Whisper reads at most 224 tokens of prompt; keep well under.
+PROMPT_CHARS = 500
 StatusFn = Callable[[str], None]
 
 
@@ -416,11 +424,14 @@ class MeetingSession:
     #: Longest a rate-limited chunk waits before trying again.
     MAX_RETRY_WAIT_S = 300
 
-    def __init__(self, store: Meetings, meeting_id: int, transcribe: TranscribeFn, on_status: StatusFn):
+    def __init__(self, store: Meetings, meeting_id: int, transcribe: TranscribeFn, on_status: StatusFn,
+                 glossary: str = ""):
         self.store = store
         self.meeting_id = meeting_id
         self.transcribe = transcribe
         self.on_status = on_status
+        self.glossary = glossary
+        self._previous = ""
         self._queue: queue.Queue = queue.Queue()
         self.chunks_done = 0
         self.chunks_skipped = 0
@@ -444,9 +455,10 @@ class MeetingSession:
             if chunk.silent:
                 self.chunks_skipped += 1  # never sent: Whisper would invent words
                 continue
+            prompt = self.prompt()
             while True:
                 try:
-                    raw = self.transcribe(chunk.wav)
+                    raw = self.transcribe(chunk.wav, prompt)
                     break
                 except RateLimited as e:
                     wait = min(self.MAX_RETRY_WAIT_S, e.retry_after or 60)
@@ -457,8 +469,18 @@ class MeetingSession:
                     self.failures.append(f"{clock(chunk.offset)}: {e}")
                     raw = []
                     break
-            self.store.add_segments(self.meeting_id, label_segments(chunk, raw))
+            segments = label_segments(chunk, raw)
+            self.store.add_segments(self.meeting_id, segments)
+            if segments:
+                self._previous = " ".join(s.text for s in segments)
             self.chunks_done += 1
+
+    def prompt(self) -> str:
+        """Names worth spelling right, then the end of what was just said."""
+        glossary = self.glossary[:PROMPT_CHARS]
+        room = PROMPT_CHARS - len(glossary) - 1
+        tail = self._previous[-room:] if self._previous and room > 0 else ""
+        return " ".join(p for p in (glossary, tail) if p).strip()
 
 
 class Recorder:
@@ -478,7 +500,8 @@ class MeetingNotes:
 
     def __init__(self, store: Meetings, records: Records, recorder_factory: RecorderFactory,
                  transcribe: TranscribeFn, chat: ChatFn, on_status: StatusFn = lambda s: None,
-                 on_done: Callable[[int, str], None] = lambda m, t: None):
+                 on_done: Callable[[int, str], None] = lambda m, t: None,
+                 known_names: Callable[[], list[str]] = lambda: []):
         self.store = store
         self.records = records
         self.recorder_factory = recorder_factory
@@ -486,6 +509,7 @@ class MeetingNotes:
         self.chat = chat
         self.on_status = on_status
         self.on_done = on_done
+        self.known_names = known_names
         self._lock = threading.Lock()
         self.meeting: Meeting | None = None
         self._recorder: Recorder | None = None
@@ -501,7 +525,7 @@ class MeetingNotes:
             if self.meeting is not None:
                 raise RuntimeError(f"already recording '{self.meeting.title}'")
             meeting = self.store.create(title)
-            session = MeetingSession(self.store, meeting.id, self.transcribe, self.on_status)
+            session = MeetingSession(self.store, meeting.id, self.transcribe, self.on_status, self.glossary(title))
             try:
                 recorder = self.recorder_factory(session.submit)
                 recorder.start()
@@ -512,6 +536,27 @@ class MeetingNotes:
             self.meeting, self._recorder, self._session, self.paused = meeting, recorder, session, False
         self.on_status("recording")
         return meeting
+
+    def glossary(self, title: str = "") -> str:
+        """'Launch sync. Names: Ram, Sita, Harsh.' - found live: without it, "Sita" came back "CETA"."""
+        try:
+            chosen: dict[str, str] = {}
+            for name in self.known_names():
+                name = (name or "").strip()
+                key = name.lower()
+                # One spelling per person, preferring a capitalised one: it is what Whisper should write.
+                if name and (key not in chosen or (name[:1].isupper() and not chosen[key][:1].isupper())):
+                    chosen[key] = name
+            names = list(chosen.values())[:25]
+        except Exception:
+            names = []
+        title = title.strip()
+        if title and title[-1] not in ".!?":
+            title += "."
+        parts = [title] if title else []
+        if names:
+            parts.append("Names: " + ", ".join(names) + ".")
+        return " ".join(parts)
 
     def pause(self) -> None:
         if self._recorder and not self.paused:

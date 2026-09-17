@@ -56,3 +56,6 @@ pyinstaller
 # R3 calendar: Google Calendar's secret iCal address, recurrence expanded (~6.5MB with tzdata)
 icalendar
 recurring-ical-events
+
+# R4 meeting notes: WASAPI loopback, the other side of a call as the PC plays it (314KB)
+soundcard

@@ -77,8 +77,13 @@ check("a chunk quiet on both tracks is silent", chunk([QUIET] * 6, [QUIET] * 6).
 
 check("'Thank you.' over silence is a phantom line", is_phantom("Thank you.", c, 4.0, 5.0))
 check("'Thank you.' over real speech is kept", not is_phantom("Thank you.", c, 2.0, 4.0))
-check("real words over silence are kept (only stock lines are dropped)",
+check("a segment with no words at all is dropped however loud (seen live: a lone '.')",
+      is_phantom(".", c, 0.0, 2.0) and is_phantom(" ... ", c, 0.0, 2.0))
+check("real words over silence are kept (only stock lines and fragments are dropped)",
       not is_phantom("The launch moves to the fourteenth", c, 4.0, 5.0))
+check("a one- or two-word fragment over silence is dropped (seen live: a lone 'We.')",
+      is_phantom("We.", c, 4.0, 5.0) and is_phantom("so yeah", c, 4.0, 5.0))
+check("...but a short reply over real speech is kept", not is_phantom("Yes, agreed.", c, 2.0, 4.0))
 labelled = label_segments(c, [Segment(0.0, 2.0, "  Ram, the backend needs another week. "),
                               Segment(2.0, 4.0, "Understood, I'll tell marketing."),
                               Segment(4.0, 5.0, "Thank you."), Segment(4.5, 5.0, "   ")])
@@ -210,7 +215,7 @@ meeting = store.create("Standup")
 statuses, seen = [], []
 
 
-def transcribe(wav):
+def transcribe(wav, prompt=""):
     seen.append(wav)
     return [Segment(0.0, 2.0, "Backend needs another week.")]
 
@@ -227,7 +232,7 @@ meetings_module.MeetingSession.MAX_RETRY_WAIT_S = 0.05
 attempts = []
 
 
-def limited_once(wav):
+def limited_once(wav, prompt=""):
     attempts.append(1)
     if len(attempts) == 1:
         raise RateLimited("audio seconds per hour", retry_after=30)
@@ -243,7 +248,7 @@ check("a rate-limited chunk waits and is retried, not lost",
 check("...and the wait is reported", any("waiting" in s and "transcription quota" in s for s in statuses), str(statuses))
 
 
-def broken(wav):
+def broken(wav, prompt=""):
     raise ValueError("bad audio")
 
 
@@ -254,6 +259,71 @@ session.submit(chunk([LOUD] * 4, [QUIET] * 4, offset=360))
 session.finish(timeout=5)
 check("a chunk that fails is recorded and the rest carry on", len(session.failures) == 2
       and session.failures[0].startswith("04:00") and session.chunks_done == 2)
+
+print("\n[context for Whisper]")
+prompts = []
+
+
+def remembers(wav, prompt=""):
+    prompts.append(prompt)
+    return [Segment(0.0, 2.0, f"Part {len(prompts)}: the launch moves to August fourteenth.")]
+
+
+meeting4 = store.create("Launch sync")
+session = MeetingSession(store, meeting4.id, remembers, statuses.append, "Launch sync. Names: Ram, Sita.")
+session.submit(chunk([LOUD] * 4, [QUIET] * 4))
+session.submit(chunk([LOUD] * 4, [QUIET] * 4, offset=120))
+session.finish(timeout=5)
+check("the first chunk is told the names to spell", prompts[0] == "Launch sync. Names: Ram, Sita.", str(prompts))
+check("later chunks also get the end of what was just said, for continuity across the cut",
+      prompts[1].startswith("Launch sync. Names: Ram, Sita.") and "Part 1: the launch moves" in prompts[1], str(prompts))
+long_session = MeetingSession(store, meeting4.id, remembers, statuses.append, "Names: " + "Someone, " * 200)
+long_session._previous = "x" * 5000
+check("the prompt stays within Whisper's limit", len(long_session.prompt()) <= meetings_module.PROMPT_CHARS + 1,
+      str(len(long_session.prompt())))
+long_session.finish(timeout=2)
+empty_session = MeetingSession(store, meeting4.id, remembers, statuses.append)
+check("with no names and nothing said yet, there is no prompt", empty_session.prompt() == "")
+empty_session.finish(timeout=2)
+
+names_store_memory, names_store, names_records = fresh()
+names_records.add("action_item", "Send the plan", "Sita")
+names_records.add("commitment", "Call the landlord", "Ram, sita")
+from core.meetings import MeetingNotes as _MN
+
+glossary_notes = _MN(names_store, names_records, lambda cb: None, lambda w, p="": [], lambda m, s: "{}",
+                     known_names=lambda: ["Harsh"] + names_records.people())
+check("the glossary lists the user and people on record, once each, any case",
+      glossary_notes.glossary("Vendor call") == "Vendor call. Names: Harsh, Ram, Sita.", glossary_notes.glossary("Vendor call"))
+broken_names = _MN(names_store, names_records, lambda cb: None, lambda w, p="": [], lambda m, s: "{}",
+                   known_names=lambda: 1 / 0)
+check("a failing name lookup never stops a recording starting", broken_names.glossary("x") == "x.")
+
+
+print("\n[cutting chunks at a pause]")
+import wave as _wave
+import io as _io
+
+from platform_desktop.recorder import FRAME_S, RATE, split_point, to_wav
+
+# Found live: fixed 5-second cuts split "August fourteenth", Whisper heard "August 5",
+# and the summary then recorded the wrong launch date.
+speech = [0.05] * 40
+speech[34] = 0.001  # a breath six frames from the end
+check("a chunk ends at the quietest moment in its last stretch", split_point(speech, search_frames=8) == 35)
+check("a pause outside the last stretch is not used", split_point([0.001] + [0.05] * 39, search_frames=8) >= 32)
+check("with no pause at all it still cuts, at the end of the stretch", split_point([0.05] * 40, 8) in range(33, 41))
+check("the latest of equally quiet moments is kept, so chunks stay long",
+      split_point([0.05] * 30 + [0.001, 0.05, 0.001, 0.05], 6) == 33)
+check("an empty chunk keeps nothing", split_point([], 5) == 0)
+
+pcm = to_wav([0.0] * RATE + [0.5] * RATE)
+with _wave.open(_io.BytesIO(pcm)) as w:
+    check("chunks are 16kHz mono 16-bit WAV, as Whisper wants", (w.getframerate(), w.getnchannels(), w.getsampwidth(),
+                                                                 w.getnframes()) == (16000, 1, 2, 2 * RATE))
+check("loud samples are clipped rather than wrapping around", to_wav([2.0])[-2:] == (32767).to_bytes(2, "little", signed=True))
+check("two minutes of chunk stay far under Whisper's 25MB limit", 120 * RATE * 2 / 1e6 < 5)
+
 
 # --- start, pause, stop -------------------------------------------------------------------
 
@@ -301,7 +371,7 @@ summary_json = json.dumps({"title": "Launch review", "summary": "The launch move
                            "action_items": [{"text": "Revise the campaign plan", "owner": "Sita", "due": "2026-09-19"}],
                            "commitments": []})
 notes, store, records, made, done, status = build(
-    [chunk([0.03] * 8, [LOUD] * 8)], lambda wav: [Segment(0, 2, "The launch moves to the fourteenth.")],
+    [chunk([0.03] * 8, [LOUD] * 8)], lambda wav, prompt="": [Segment(0, 2, "The launch moves to the fourteenth.")],
     lambda messages, system: summary_json)
 meeting = notes.start("Weekly sync")
 check("start begins recording a new meeting", notes.recording and made[0].events == ["start"]
@@ -323,7 +393,7 @@ check("progress was reported along the way", "recording" in status and "writing 
       str(status))
 check("stopping when nothing is recording is refused", raises(lambda: notes.stop(), RuntimeError))
 
-notes, store, records, made, done, status = build([chunk([QUIET] * 8, [QUIET] * 8)], lambda wav: [],
+notes, store, records, made, done, status = build([chunk([QUIET] * 8, [QUIET] * 8)], lambda wav, prompt="": [],
                                                   lambda m, s: summary_json)
 meeting = notes.start()
 notes.stop(wait=True)
@@ -336,14 +406,14 @@ def quota_gone(messages, system):
 
 
 notes, store, records, made, done, status = build([chunk([LOUD] * 8, [QUIET] * 8)],
-                                                  lambda wav: [Segment(0, 1, "Let's begin.")], quota_gone)
+                                                  lambda wav, prompt="": [Segment(0, 1, "Let's begin.")], quota_gone)
 meeting = notes.start()
 notes.stop(wait=True)
 check("if the summary cannot be written, the transcript is still kept and the user told",
       store.transcript_lines(meeting.id) == ["[00:00] Room: Let's begin."] and "transcript is saved" in done[0][1]
       and store.get(meeting.id).status == "done", str(done))
 
-notes, store, records, made, done, status = build([], lambda wav: [], lambda m, s: "{}", fail=True)
+notes, store, records, made, done, status = build([], lambda wav, prompt="": [], lambda m, s: "{}", fail=True)
 check("a recorder that cannot start is reported, and nothing is left recording",
       raises(lambda: notes.start("No mic"), RuntimeError) and not notes.recording
       and store.latest().status == "failed" and "no microphone" in store.latest().error)
@@ -352,7 +422,7 @@ check("a recorder that cannot start is reported, and nothing is left recording",
 
 print("\n[meeting tools]")
 notes, store, records, made, done, status = build(
-    [chunk([0.03] * 8, [LOUD] * 8)], lambda wav: [Segment(0, 2, "The vendor contract waits until October.")],
+    [chunk([0.03] * 8, [LOUD] * 8)], lambda wav, prompt="": [Segment(0, 2, "The vendor contract waits until October.")],
     lambda messages, system: summary_json)
 reg = ToolRegistry()
 register(reg, notes)

@@ -60,7 +60,7 @@ plan to Bantu's constraints; he approved all four blocks). In order:
 | R1 | Readiness polish | **done** — faster speech instead of streaming, long chats fit Groq, past chats, new-chat button |
 | R2 | Memory + tasks | **done** — structured records (commitments, decisions, action items, people, deadlines) in SQLite + FTS5; answers **cite date and source and say "no record" rather than guess**; tasks with overdue follow-up via the scheduler; knowledge folder; local audit log of approved/declined/blocked actions |
 | R3 | Daily briefing + calendar | **done** (calendar tools still need a live model run: `stress_real.py --only=calendar_add,calendar_list`, quotas were spent); briefing **only when asked** and weather for a city set in Settings (Harsh, 2026-09-17); spoken morning briefing; local events plus Google Calendar's read-only secret iCal address (no OAuth); personality: **warm professional** by default, tone changeable in Settings, time-of-day greeting |
-| R4 | Meeting notes | **core done** (`core/meetings.py`: storage, speaker labels, phantom-line filter, transcription queue, summary, tools; not wired yet). Harsh, 2026-09-17: transcripts kept **90 days** by default; a spoken or typed start begins **at once** (no confirm), with indicator and consent reminder. |
+| R4 | Meeting notes | **recording, transcription and summaries done and live-tested** (HUD controls and the Meetings tab next). Harsh, 2026-09-17: transcripts kept **90 days** by default; a spoken or typed start begins **at once** (no confirm), with indicator and consent reminder. |
 | R5 | Trust layer + wake word | Windows Hello (`UserConsentVerifier`) for chosen sensitive actions; Activity view in Settings; retention settings; wake-word spike on Windows' built-in offline recognizer, falling back to a ~2MB custom openWakeWord model |
 
 Spikes to run before building on them: Groq Whisper long-audio limits, Windows Hello from a desktop
@@ -473,7 +473,40 @@ real app is unaffected (one HUD per process): launched and quit 3 times, exit 0 
 build several HUDs must keep references to all of them.** Also: Settings tests now find tabs by name,
 since adding a tab shifts indexes.
 
-## Meeting notes spikes (R4, 2026-09-17) — measured, nothing built yet
+## Meeting notes (R4, 2026-09-17)
+
+`core/meetings.py` (portable: storage, speaker labels, the transcription queue, summaries, tools) and
+`platform_desktop/recorder.py` (Windows capture with `soundcard`, Groq Whisper segments). Start/stop from
+the tools (`start_meeting_notes`, AUTO, as Harsh chose) or the HUD. **Audio never touches the disk**:
+the microphone and the PC's loopback are read in 0.5s frames, mixed into one track (one share of the
+audio quota), and handed over as 2-minute WAV chunks with each track's loudness per frame. A worker
+transcribes as chunks arrive, so a crash loses at most one chunk; silent chunks are never sent.
+
+- **Who spoke** comes from loudness, not a second transcription: call audio active -> "Call" (the mic
+  hears the call through the speakers, so call wins); mic only, in a chunk with call audio -> "You";
+  no call audio at all -> "Room". Individual people on a call cannot be told apart for free.
+- **Phantom lines** are dropped: wordless segments ("."), stock lines ("Thank you."), and one- or
+  two-word fragments, whenever the stretch was quiet.
+- **Chunks end at a pause**, the quietest frame in the last 15s. Found live with fixed cuts: "August
+  fourteenth" was split, Whisper heard "August 5", and the summary recorded the wrong launch date.
+- **Whisper gets a prompt**: the title, the names on record plus the user's name (one spelling each,
+  capitalised preferred), and the end of the previous chunk, capped at 500 chars. Found live: without
+  names, "Sita" came back "CETA". The prompt-length cap had its own bug (a long glossary made it
+  negative, giving a 4,193-char prompt), caught by a test.
+- **Summary** (no tools): JSON with title, summary, topics, decisions, action items (owner, due) and
+  what "You" promised; the prompt forbids judging or characterising people. Decisions, action items and
+  commitments are saved as records pointing at `meeting:<id>`. A meeting too large for one request (Groq
+  413) falls back to part-by-part notes, then one summary; out of quota everywhere, it gives up and keeps
+  the transcript.
+- **Retention**: `meeting_retention_days` 90 by default (Harsh), pruned at start-up, never while
+  recording; records saved from a meeting stay. A silent default microphone (here, the unplugged Iriun
+  webcam) triggers a warning to pick one in Settings.
+
+Live end to end (5s chunks, a mock meeting played through the speakers): transcript labelled Call, the
+summary had the right date (August 14), "Sita" as owner of the action item, two decisions and one
+action item saved to memory, 27s from start to summary.
+
+### Spikes before building
 
 - **Groq Whisper free limits** (published): 20 req/min, 2,000 req/day, **7,200 audio seconds per hour
   and 28,800 per day** (2h/hour, 8h/day), 25MB per file, 10s minimum billed. `verbose_json` with
@@ -564,6 +597,8 @@ Tests:
 - `tests/test_r4_meetings.py` — 64 checks, no API key, audio/Whisper/model faked: who spoke (call vs you vs
   room), phantom lines over silence, storage and search, 90-day pruning, summaries in one pass or in parts,
   records saved from a meeting, the transcription queue (silence skipped, rate-limit retry), start/pause/stop.
+- `tests/test_r4_meetings.py` now 81 checks: also context prompts and their length cap, the name
+  glossary, cutting chunks at a pause, WAV format, and fragments over silence.
 - `tests/test_readiness.py` — no API key: one section per stress-test finding that has been
   fixed, checked against the pre-fix behaviour (the decline tests fail 12 of 33 on the old code).
 - `tests/smoke_live.py` — 26 checks against the real API, needs Gemini + Groq keys, spends ~15

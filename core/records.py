@@ -245,6 +245,22 @@ class Records:
         self.db.commit()
         return self.get(record_id)
 
+    def people(self, limit: int = 50) -> list[str]:
+        """Names on record, most recently mentioned first."""
+        seen: dict[str, str] = {}  # lower-case -> the spelling kept
+        for row in self.db.execute("SELECT people FROM records WHERE people != '' ORDER BY created_at DESC LIMIT 500"):
+            for name in row["people"].split(", "):
+                key = name.lower()
+                if not name:
+                    continue
+                if key not in seen:
+                    if len(seen) >= limit:
+                        return list(seen.values())
+                    seen[key] = name
+                elif name[:1].isupper() and not seen[key][:1].isupper():
+                    seen[key] = name
+        return list(seen.values())
+
     def delete(self, record_id: int) -> bool:
         cur = self.db.execute("DELETE FROM records WHERE id=?", (record_id,))
         self.db.commit()
